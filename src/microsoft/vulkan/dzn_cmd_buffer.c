@@ -326,6 +326,9 @@ dzn_cmd_buffer_image_barrier(struct dzn_cmd_buffer *cmdbuf,
       .Subresources.FirstPlane = first_plane,
       .Subresources.NumPlanes = plane_count,
       .pResource = image->res,
+      .Flags = layout_before == D3D12_BARRIER_LAYOUT_UNDEFINED &&
+               layout_after != D3D12_BARRIER_LAYOUT_UNDEFINED ?
+               D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE,
    };
    D3D12_BARRIER_GROUP group = {
       .Type = D3D12_BARRIER_TYPE_TEXTURE,
