@@ -2376,12 +2376,13 @@ dzn_CreateGraphicsPipelines(VkDevice dev,
 
    unsigned i;
    for (i = 0; i < count; i++) {
-      result = dzn_graphics_pipeline_create(device,
-                                            pipelineCache,
-                                            &pCreateInfos[i],
-                                            pAllocator,
-                                            &pPipelines[i]);
-      if (result != VK_SUCCESS) {
+      VkResult res = dzn_graphics_pipeline_create(device,
+                                                  pipelineCache,
+                                                  &pCreateInfos[i],
+                                                  pAllocator,
+                                                  &pPipelines[i]);
+      if (res != VK_SUCCESS) {
+         result = res;
          pPipelines[i] = VK_NULL_HANDLE;
 
          /* Bail out on the first error != VK_PIPELINE_COMPILE_REQUIRED_EX as it
@@ -2681,12 +2682,13 @@ dzn_CreateComputePipelines(VkDevice dev,
 
    unsigned i;
    for (i = 0; i < count; i++) {
-      result = dzn_compute_pipeline_create(device,
-                                           pipelineCache,
-                                           &pCreateInfos[i],
-                                           pAllocator,
-                                           &pPipelines[i]);
-      if (result != VK_SUCCESS) {
+      VkResult res = dzn_compute_pipeline_create(device,
+                                                 pipelineCache,
+                                                 &pCreateInfos[i],
+                                                 pAllocator,
+                                                 &pPipelines[i]);
+      if (res != VK_SUCCESS) {
+         result = res;
          pPipelines[i] = VK_NULL_HANDLE;
 
          /* Bail out on the first error != VK_PIPELINE_COMPILE_REQUIRED_EX as it
