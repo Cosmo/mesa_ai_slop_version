@@ -5127,16 +5127,26 @@ dzn_CmdBeginRendering(VkCommandBuffer commandBuffer,
          layout = s_att->imageLayout;
       }
 
-      if (aspects != 0) {
+      VkImageAspectFlags clear_aspects[2] = { aspects, 0 };
+      VkImageLayout clear_layouts[2] = { layout, layout };
+      if (aspects == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) &&
+          z_att->imageLayout != s_att->imageLayout) {
+         clear_aspects[0] = VK_IMAGE_ASPECT_DEPTH_BIT;
+         clear_layouts[0] = z_att->imageLayout;
+         clear_aspects[1] = VK_IMAGE_ASPECT_STENCIL_BIT;
+         clear_layouts[1] = s_att->imageLayout;
+      }
+
+      for (uint32_t i = 0; i < ARRAY_SIZE(clear_aspects) && clear_aspects[i]; i++) {
          if (pRenderingInfo->viewMask != 0) {
             u_foreach_bit(layer, pRenderingInfo->viewMask) {
-               dzn_cmd_buffer_clear_attachment(cmdbuf, iview, layout,
-                                               &clear_val, aspects, layer,
+               dzn_cmd_buffer_clear_attachment(cmdbuf, iview, clear_layouts[i],
+                                               &clear_val, clear_aspects[i], layer,
                                                1, 1, &cmdbuf->state.render.area);
             }
          } else {
-            dzn_cmd_buffer_clear_attachment(cmdbuf, iview, layout,
-                                            &clear_val, aspects, 0,
+            dzn_cmd_buffer_clear_attachment(cmdbuf, iview, clear_layouts[i],
+                                            &clear_val, clear_aspects[i], 0,
                                             VK_REMAINING_ARRAY_LAYERS, 1,
                                             &cmdbuf->state.render.area);
          }
