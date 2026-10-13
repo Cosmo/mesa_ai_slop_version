@@ -674,8 +674,12 @@ dzn_cmd_buffer_create(const VkCommandBufferAllocateInfo *info,
          goto out;
       }
 
-      (void)ID3D12GraphicsCommandList_QueryInterface(cmdbuf->cmdlist, &IID_ID3D12GraphicsCommandList8, (void **)&cmdbuf->cmdlist8);
-      (void)ID3D12GraphicsCommandList_QueryInterface(cmdbuf->cmdlist, &IID_ID3D12GraphicsCommandList9, (void **)&cmdbuf->cmdlist9);
+      const struct dzn_instance *instance =
+         container_of(pdev->vk.instance, struct dzn_instance, vk);
+      if (instance->max_d3d12_options >= 12) {
+         (void)ID3D12GraphicsCommandList_QueryInterface(cmdbuf->cmdlist, &IID_ID3D12GraphicsCommandList8, (void **)&cmdbuf->cmdlist8);
+         (void)ID3D12GraphicsCommandList_QueryInterface(cmdbuf->cmdlist, &IID_ID3D12GraphicsCommandList9, (void **)&cmdbuf->cmdlist9);
+      }
    }
 
    cmdbuf->type = type;

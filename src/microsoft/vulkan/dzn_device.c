@@ -204,6 +204,8 @@ static const struct debug_control dzn_debug_options[] = {
    { "nobindless", DZN_DEBUG_NO_BINDLESS },
    { "experimental", DZN_DEBUG_EXPERIMENTAL },
    { "multiview", DZN_DEBUG_MULTIVIEW },
+   { "no16bit", DZN_DEBUG_NO_16BIT },
+   { "nostencilref", DZN_DEBUG_NO_STENCIL_REF },
    { NULL, 0 }
 };
 
@@ -378,9 +380,9 @@ dzn_physical_device_init_uuids(struct dzn_physical_device *pdev)
    _mesa_blake3_init(&blake3_ctx);
    _mesa_blake3_update(&blake3_ctx,  mesa_version, strlen(mesa_version));
    disk_cache_get_function_identifier(dzn_physical_device_init_uuids, &blake3_ctx);
-   _mesa_blake3_update(&blake3_ctx, &pdev->options,
+   _mesa_blake3_update(&blake3_ctx, &pdev->shader_model,
       offsetof(struct dzn_physical_device, options21) + sizeof(pdev->options21) -
-                     offsetof(struct dzn_physical_device, options));
+                     offsetof(struct dzn_physical_device, shader_model));
    _mesa_blake3_final(&blake3_ctx, blake3);
    memcpy(pdev->pipeline_cache_uuid, blake3, VK_UUID_SIZE);
 
@@ -407,9 +409,24 @@ const struct vk_pipeline_cache_object_ops *const dzn_pipeline_cache_import_ops[]
    NULL,
 };
 
+static bool
+dzn_physical_device_get_options(struct dzn_physical_device *pdev,
+                                uint32_t index,
+                                D3D12_FEATURE feature,
+                                void *data, uint32_t size)
+{
+   const struct dzn_instance *instance =
+      container_of(pdev->vk.instance, struct dzn_instance, vk);
+
+   return index <= instance->max_d3d12_options &&
+          SUCCEEDED(ID3D12Device1_CheckFeatureSupport(pdev->dev, feature, data, size));
+}
+
 static void
 dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
 {
+   const struct dzn_instance *instance =
+      container_of(pdev->vk.instance, struct dzn_instance, vk);
    D3D_FEATURE_LEVEL checklist[] = {
       D3D_FEATURE_LEVEL_11_0,
       D3D_FEATURE_LEVEL_11_1,
@@ -431,6 +448,9 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
       D3D_SHADER_MODEL_6_4, D3D_SHADER_MODEL_6_3, D3D_SHADER_MODEL_6_2, D3D_SHADER_MODEL_6_1,
    };
    for (UINT i = 0; i < ARRAY_SIZE(valid_shader_models); ++i) {
+      if ((uint32_t)valid_shader_models[i] > instance->max_shader_model)
+         continue;
+
       D3D12_FEATURE_DATA_SHADER_MODEL shader_model = { valid_shader_models[i] };
       if (SUCCEEDED(ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model)))) {
          pdev->shader_model = shader_model.HighestShaderModel;
@@ -451,23 +471,23 @@ dzn_physical_device_cache_caps(struct dzn_physical_device *pdev)
    }
 
    ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_ARCHITECTURE1, &pdev->architecture, sizeof(pdev->architecture));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS, &pdev->options, sizeof(pdev->options));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS1, &pdev->options1, sizeof(pdev->options1));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS2, &pdev->options2, sizeof(pdev->options2));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS3, &pdev->options3, sizeof(pdev->options3));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS4, &pdev->options4, sizeof(pdev->options4));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS12, &pdev->options12, sizeof(pdev->options12));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS13, &pdev->options13, sizeof(pdev->options13));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS14, &pdev->options14, sizeof(pdev->options14));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS15, &pdev->options15, sizeof(pdev->options15));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS16, &pdev->options16, sizeof(pdev->options16));
-   ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS17, &pdev->options17, sizeof(pdev->options17));
-   if (FAILED(ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS19, &pdev->options19, sizeof(pdev->options19)))) {
+   dzn_physical_device_get_options(pdev, 0, D3D12_FEATURE_D3D12_OPTIONS, &pdev->options, sizeof(pdev->options));
+   dzn_physical_device_get_options(pdev, 1, D3D12_FEATURE_D3D12_OPTIONS1, &pdev->options1, sizeof(pdev->options1));
+   dzn_physical_device_get_options(pdev, 2, D3D12_FEATURE_D3D12_OPTIONS2, &pdev->options2, sizeof(pdev->options2));
+   dzn_physical_device_get_options(pdev, 3, D3D12_FEATURE_D3D12_OPTIONS3, &pdev->options3, sizeof(pdev->options3));
+   dzn_physical_device_get_options(pdev, 4, D3D12_FEATURE_D3D12_OPTIONS4, &pdev->options4, sizeof(pdev->options4));
+   dzn_physical_device_get_options(pdev, 12, D3D12_FEATURE_D3D12_OPTIONS12, &pdev->options12, sizeof(pdev->options12));
+   dzn_physical_device_get_options(pdev, 13, D3D12_FEATURE_D3D12_OPTIONS13, &pdev->options13, sizeof(pdev->options13));
+   dzn_physical_device_get_options(pdev, 14, D3D12_FEATURE_D3D12_OPTIONS14, &pdev->options14, sizeof(pdev->options14));
+   dzn_physical_device_get_options(pdev, 15, D3D12_FEATURE_D3D12_OPTIONS15, &pdev->options15, sizeof(pdev->options15));
+   dzn_physical_device_get_options(pdev, 16, D3D12_FEATURE_D3D12_OPTIONS16, &pdev->options16, sizeof(pdev->options16));
+   dzn_physical_device_get_options(pdev, 17, D3D12_FEATURE_D3D12_OPTIONS17, &pdev->options17, sizeof(pdev->options17));
+   if (!dzn_physical_device_get_options(pdev, 19, D3D12_FEATURE_D3D12_OPTIONS19, &pdev->options19, sizeof(pdev->options19))) {
       pdev->options19.MaxSamplerDescriptorHeapSize = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
       pdev->options19.MaxSamplerDescriptorHeapSizeWithStaticSamplers = pdev->options19.MaxSamplerDescriptorHeapSize;
       pdev->options19.MaxViewDescriptorHeapSize = D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1;
    }
-   if (FAILED(ID3D12Device1_CheckFeatureSupport(pdev->dev, D3D12_FEATURE_D3D12_OPTIONS21, &pdev->options21, sizeof(pdev->options21)))) {
+   if (!dzn_physical_device_get_options(pdev, 21, D3D12_FEATURE_D3D12_OPTIONS21, &pdev->options21, sizeof(pdev->options21))) {
       pdev->options21.ExecuteIndirectTier = D3D12_EXECUTE_INDIRECT_TIER_1_0;
    }
    {
@@ -1198,20 +1218,27 @@ dzn_physical_device_create(struct vk_instance *instance,
       return vk_error(instance, VK_ERROR_INITIALIZATION_FAILED);
    }
 
-   if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device10, (void **)&pdev->dev10)))
-      pdev->dev10 = NULL;
-   if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device11, (void **)&pdev->dev11)))
-      pdev->dev11 = NULL;
-   if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device12, (void **)&pdev->dev12)))
-      pdev->dev12 = NULL;
-   if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device13, (void **)&pdev->dev13)))
-      pdev->dev13 = NULL;
+   if (dzn_instance->max_d3d12_options >= 12) {
+      if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device10, (void **)&pdev->dev10)))
+         pdev->dev10 = NULL;
+      if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device11, (void **)&pdev->dev11)))
+         pdev->dev11 = NULL;
+      if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device12, (void **)&pdev->dev12)))
+         pdev->dev12 = NULL;
+      if (FAILED(ID3D12Device1_QueryInterface(pdev->dev, &IID_ID3D12Device13, (void **)&pdev->dev13)))
+         pdev->dev13 = NULL;
+   }
    dzn_physical_device_cache_caps(pdev);
-   dzn_physical_device_init_memory(pdev);
-   dzn_physical_device_init_uuids(pdev);
 
    if (dzn_instance->debug_flags & DZN_DEBUG_MULTIVIEW)
       pdev->options3.ViewInstancingTier = D3D12_VIEW_INSTANCING_TIER_NOT_SUPPORTED;
+   if (dzn_instance->debug_flags & DZN_DEBUG_NO_16BIT)
+      pdev->options4.Native16BitShaderOpsSupported = false;
+   if (dzn_instance->debug_flags & DZN_DEBUG_NO_STENCIL_REF)
+      pdev->options.PSSpecifiedStencilRefSupported = false;
+
+   dzn_physical_device_init_memory(pdev);
+   dzn_physical_device_init_uuids(pdev);
 
    dzn_physical_device_get_extensions(pdev);
    if (dzn_instance->drirc.debug.enable_8bit_loads_stores &&
@@ -1894,6 +1921,14 @@ dzn_instance_create(const VkInstanceCreateInfo *pCreateInfo,
    instance->vk.physical_devices.destroy = dzn_physical_device_destroy;
    instance->debug_flags =
       parse_debug_string(os_get_option("DZN_DEBUG"), dzn_debug_options);
+
+   const char *max_shader_model = os_get_option("DZN_MAX_SHADER_MODEL");
+   unsigned sm_major, sm_minor;
+   instance->max_shader_model =
+      max_shader_model && sscanf(max_shader_model, "%u.%u", &sm_major, &sm_minor) == 2 ?
+      (sm_major << 4) | sm_minor : UINT32_MAX;
+   instance->max_d3d12_options =
+      debug_get_num_option("DZN_MAX_D3D12_OPTIONS", UINT32_MAX);
 
 #ifdef _WIN32
    if (instance->debug_flags & DZN_DEBUG_DEBUGGER) {

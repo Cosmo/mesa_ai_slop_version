@@ -1354,6 +1354,8 @@ enum dzn_debug_flags {
    DZN_DEBUG_NO_BINDLESS = 1 << 11,
    DZN_DEBUG_EXPERIMENTAL = 1 << 12,
    DZN_DEBUG_MULTIVIEW = 1 << 13,
+   DZN_DEBUG_NO_16BIT = 1 << 14,
+   DZN_DEBUG_NO_STENCIL_REF = 1 << 15,
 };
 
 struct dzn_instance {
@@ -1366,6 +1368,8 @@ struct dzn_instance {
       PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE serialize_root_sig;
    } d3d12;
    uint32_t debug_flags;
+   uint32_t max_shader_model;
+   uint32_t max_d3d12_options;
 
    struct vk_sync_binary_type sync_binary_type;
 
