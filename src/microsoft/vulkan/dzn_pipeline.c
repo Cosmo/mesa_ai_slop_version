@@ -1683,6 +1683,20 @@ dzn_graphics_pipeline_translate_zsa(struct dzn_device *device,
    }
 }
 
+static bool
+is_constant_alpha_blend_factor(VkBlendFactor factor)
+{
+   return factor == VK_BLEND_FACTOR_CONSTANT_ALPHA ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+}
+
+static bool
+is_constant_color_blend_factor(VkBlendFactor factor)
+{
+   return factor == VK_BLEND_FACTOR_CONSTANT_COLOR ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+}
+
 static D3D12_BLEND
 translate_blend_factor(VkBlendFactor in, bool is_alpha, bool support_alpha_blend_factor)
 {
@@ -1775,6 +1789,7 @@ dzn_graphics_pipeline_translate_blend(struct dzn_graphics_pipeline *pipeline,
    struct dzn_physical_device *pdev =
       container_of(device->vk.physical, struct dzn_physical_device, vk);
    bool support_alpha_blend_factor = pdev->options13.AlphaBlendFactorSupported;
+   bool constant_alpha = false, constant_color = false;
 
    d3d12_gfx_pipeline_state_stream_new_desc(out, BLEND, D3D12_BLEND_DESC, desc);
    D3D12_LOGIC_OP logicop =
@@ -1811,8 +1826,19 @@ dzn_graphics_pipeline_translate_blend(struct dzn_graphics_pipeline *pipeline,
             translate_blend_factor(in_blend->pAttachments[i].dstAlphaBlendFactor, true, support_alpha_blend_factor);
          desc->RenderTarget[i].BlendOpAlpha =
             translate_blend_op(in_blend->pAttachments[i].alphaBlendOp);
+
+         const VkPipelineColorBlendAttachmentState *att = &in_blend->pAttachments[i];
+         if (att->blendEnable) {
+            constant_alpha |= is_constant_alpha_blend_factor(att->srcColorBlendFactor) ||
+                              is_constant_alpha_blend_factor(att->dstColorBlendFactor);
+            constant_color |= is_constant_color_blend_factor(att->srcColorBlendFactor) ||
+                              is_constant_color_blend_factor(att->dstColorBlendFactor);
+         }
       }
    }
+
+   pipeline->blend.splat_constant_alpha =
+      !support_alpha_blend_factor && constant_alpha && !constant_color;
 }
 
 

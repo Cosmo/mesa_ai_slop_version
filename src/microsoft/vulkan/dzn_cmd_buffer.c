@@ -3638,9 +3638,16 @@ dzn_cmd_buffer_update_zsa(struct dzn_cmd_buffer *cmdbuf)
 static void
 dzn_cmd_buffer_update_blend_constants(struct dzn_cmd_buffer *cmdbuf)
 {
-   if (cmdbuf->state.dirty & DZN_CMD_DIRTY_BLEND_CONSTANTS)
-      ID3D12GraphicsCommandList1_OMSetBlendFactor(cmdbuf->cmdlist,
-                                                  cmdbuf->state.blend.constants);
+   if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_BLEND_CONSTANTS))
+      return;
+
+   const struct dzn_graphics_pipeline *gfx = (const struct dzn_graphics_pipeline *)
+      cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
+   const float *constants = cmdbuf->state.blend.constants;
+   float alpha[4] = { constants[3], constants[3], constants[3], constants[3] };
+
+   ID3D12GraphicsCommandList1_OMSetBlendFactor(cmdbuf->cmdlist,
+                                               gfx->blend.splat_constant_alpha ? alpha : constants);
 }
 
 static void
@@ -5228,8 +5235,8 @@ dzn_CmdBindPipeline(VkCommandBuffer commandBuffer,
       if (!gfx->blend.dynamic_constants) {
          memcpy(cmdbuf->state.blend.constants, gfx->blend.constants,
                 sizeof(cmdbuf->state.blend.constants));
-         cmdbuf->state.dirty |= DZN_CMD_DIRTY_BLEND_CONSTANTS;
       }
+      cmdbuf->state.dirty |= DZN_CMD_DIRTY_BLEND_CONSTANTS;
 
       if (!(gfx->dynamic & DZN_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE)) {
          for (uint32_t vb = 0; vb < gfx->vb.count; vb++)

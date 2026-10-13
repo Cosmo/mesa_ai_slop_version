@@ -1055,6 +1055,7 @@ struct dzn_graphics_pipeline {
 
    struct {
       bool dynamic_constants;
+      bool splat_constant_alpha;
       float constants[4];
    } blend;
 
