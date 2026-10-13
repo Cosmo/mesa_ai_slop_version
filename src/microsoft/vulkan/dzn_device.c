@@ -58,7 +58,7 @@
 #include "dzn_dxgi.h"
 #endif
 
-#define DZN_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
+#define DZN_API_VERSION VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION)
 
 #define MAX_TIER2_MEMORY_TYPES 4
 
@@ -832,6 +832,15 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
    };
 }
 
+static uint32_t
+dzn_physical_device_get_api_version(const struct dzn_physical_device *pdev)
+{
+   if (pdev->shader_model >= D3D_SHADER_MODEL_6_6 && pdev->options1.WaveOps)
+      return DZN_API_VERSION;
+
+   return VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION);
+}
+
 static void
 dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
                                    struct vk_properties *properties)
@@ -848,7 +857,7 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
    }
 
    *properties = (struct vk_properties){
-      .apiVersion = DZN_API_VERSION,
+      .apiVersion = dzn_physical_device_get_api_version(pdev),
       .driverVersion = vk_get_driver_version(),
 
       .vendorID = pdev->desc.vendor_id,
