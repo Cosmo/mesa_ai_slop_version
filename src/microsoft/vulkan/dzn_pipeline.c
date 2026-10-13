@@ -880,6 +880,9 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
          return VK_SUCCESS;
    }
 
+   if (pipeline->base.flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
+      return VK_PIPELINE_COMPILE_REQUIRED;
+
    /* Second step: get NIR shaders for all stages. */
    nir_shader_compiler_options nir_opts;
    unsigned supported_bit_sizes = (pdev->options4.Native16BitShaderOpsSupported ? 16 : 0) | 32 | 64;
@@ -2513,6 +2516,11 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
                                                        &cache_hit);
       if (ret != VK_SUCCESS || cache_hit)
          goto out;
+   }
+
+   if (pipeline->base.flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR) {
+      ret = VK_PIPELINE_COMPILE_REQUIRED;
+      goto out;
    }
 
    if (cache) {
