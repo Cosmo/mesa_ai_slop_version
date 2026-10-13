@@ -120,6 +120,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_external_memory_fd                = true,
       .KHR_external_semaphore_fd             = true,
 #endif
+      .KHR_format_feature_flags2             = true,
       .KHR_image_format_list                 = true,
       .KHR_imageless_framebuffer             = true,
       .KHR_get_memory_requirements2          = true,
@@ -1628,6 +1629,30 @@ dzn_physical_device_get_image_format_properties(struct dzn_physical_device *pdev
    return VK_SUCCESS;
 }
 
+static VkFormatFeatureFlags2
+dzn_physical_device_get_format_features2(struct dzn_physical_device *pdev,
+                                         VkFormat format,
+                                         VkFormatFeatureFlags features)
+{
+   VkFormatFeatureFlags2 features2 = features;
+
+   if (features & (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+                   VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)) {
+      D3D12_FEATURE_DATA_FORMAT_SUPPORT dfmt_info =
+         dzn_physical_device_get_format_support(pdev, format, 0);
+
+      features2 |= VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
+      if (dfmt_info.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD)
+         features2 |= VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT;
+   }
+
+   if ((features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) &&
+       vk_format_has_depth(format))
+      features2 |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
+
+   return features2;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 dzn_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
                                        VkFormat format,
@@ -1636,6 +1661,19 @@ dzn_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
    VK_FROM_HANDLE(dzn_physical_device, pdev, physicalDevice);
 
    dzn_physical_device_get_format_properties(pdev, format, pFormatProperties);
+
+   VkFormatProperties3 *props3 =
+      vk_find_struct(pFormatProperties->pNext, FORMAT_PROPERTIES_3);
+   if (props3) {
+      const VkFormatProperties *props = &pFormatProperties->formatProperties;
+
+      props3->linearTilingFeatures =
+         dzn_physical_device_get_format_features2(pdev, format, props->linearTilingFeatures);
+      props3->optimalTilingFeatures =
+         dzn_physical_device_get_format_features2(pdev, format, props->optimalTilingFeatures);
+      props3->bufferFeatures =
+         dzn_physical_device_get_format_features2(pdev, format, props->bufferFeatures);
+   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
