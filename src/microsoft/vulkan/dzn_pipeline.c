@@ -188,6 +188,22 @@ dzn_graphics_pipeline_prepare_for_variants(struct dzn_device *device,
    return VK_SUCCESS;
 }
 
+static bool
+dzn_graphics_pipeline_static_rast_discard(const struct dzn_graphics_pipeline *pipeline,
+                                          const VkGraphicsPipelineCreateInfo *info)
+{
+   return info->pRasterizationState->rasterizerDiscardEnable &&
+          !(pipeline->dynamic & DZN_DYNAMIC_RASTERIZER_DISCARD_ENABLE);
+}
+
+static bool
+dzn_graphics_pipeline_static_cull_all(const struct dzn_graphics_pipeline *pipeline,
+                                      const VkGraphicsPipelineCreateInfo *info)
+{
+   return info->pRasterizationState->cullMode == VK_CULL_MODE_FRONT_AND_BACK &&
+          !(pipeline->dynamic & DZN_DYNAMIC_CULL_MODE);
+}
+
 static dxil_spirv_shader_stage
 to_dxil_shader_stage(VkShaderStageFlagBits in)
 {
@@ -760,7 +776,7 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
    struct dzn_physical_device *pdev =
       container_of(device->vk.physical, struct dzn_physical_device, vk);
    const VkPipelineViewportStateCreateInfo *vp_info =
-      info->pRasterizationState->rasterizerDiscardEnable ?
+      dzn_graphics_pipeline_static_rast_discard(pipeline, info) ?
       NULL : info->pViewportState;
    struct {
       const VkPipelineShaderStageCreateInfo *info;
@@ -794,8 +810,8 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
 
       if (stage == MESA_SHADER_FRAGMENT &&
           info->pRasterizationState &&
-          (info->pRasterizationState->rasterizerDiscardEnable ||
-           info->pRasterizationState->cullMode == VK_CULL_MODE_FRONT_AND_BACK)) {
+          (dzn_graphics_pipeline_static_rast_discard(pipeline, info) ||
+           dzn_graphics_pipeline_static_cull_all(pipeline, info))) {
          /* Disable rasterization (AKA leave fragment shader NULL) when
           * front+back culling or discard is set.
           */
@@ -839,7 +855,7 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
    }
 
    bool force_sample_rate_shading =
-      !info->pRasterizationState->rasterizerDiscardEnable &&
+      !dzn_graphics_pipeline_static_rast_discard(pipeline, info) &&
       info->pMultisampleState &&
       info->pMultisampleState->sampleShadingEnable;
 
@@ -1249,6 +1265,16 @@ to_prim_topology(VkPrimitiveTopology in, unsigned patch_control_points, bool sup
    }
 }
 
+D3D12_PRIMITIVE_TOPOLOGY
+dzn_translate_primitive_topology(const struct dzn_physical_device *pdev,
+                                 VkPrimitiveTopology topology,
+                                 bool *triangle_fan)
+{
+   *triangle_fan = topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN &&
+                   !pdev->options15.TriangleFanSupported;
+   return to_prim_topology(topology, 0, pdev->options15.TriangleFanSupported);
+}
+
 static VkResult
 dzn_graphics_pipeline_translate_ia(struct dzn_device *device,
                                    struct dzn_graphics_pipeline *pipeline,
@@ -1277,8 +1303,11 @@ dzn_graphics_pipeline_translate_ia(struct dzn_device *device,
    pipeline->ia.topology =
       to_prim_topology(in_ia->topology, in_tes ? in_tes->patchControlPoints : 0,
                        pdev->options15.TriangleFanSupported);
+   pipeline->statics.topology = in_ia->topology;
+   pipeline->statics.primitive_restart = in_ia->primitiveRestartEnable;
 
-   if (in_ia->primitiveRestartEnable) {
+   if (in_ia->primitiveRestartEnable ||
+       (pipeline->dynamic & DZN_DYNAMIC_PRIMITIVE_RESTART_ENABLE)) {
       d3d12_gfx_pipeline_state_stream_new_desc(out, IB_STRIP_CUT_VALUE, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE, ib_strip_cut);
       pipeline->templates.desc_offsets.ib_strip_cut =
          (uintptr_t)ib_strip_cut - (uintptr_t)out->pPipelineStateSubobjectStream;
@@ -1336,9 +1365,16 @@ dzn_graphics_pipeline_translate_rast(struct dzn_device *device,
    const VkPipelineRasterizationStateCreateInfo *in_rast =
       in->pRasterizationState;
    const VkPipelineViewportStateCreateInfo *in_vp =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pViewportState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pViewportState;
    const VkPipelineMultisampleStateCreateInfo *in_ms =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pMultisampleState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pMultisampleState;
+
+   pipeline->statics.cull_mode = in_rast->cullMode;
+   pipeline->statics.front_ccw = in_rast->frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE;
+   pipeline->statics.depth_bias_enable = in_rast->depthBiasEnable;
+   pipeline->statics.depth_bias_constant = in_rast->depthBiasConstantFactor;
+   pipeline->statics.depth_bias_clamp = in_rast->depthBiasClamp;
+   pipeline->statics.depth_bias_slope = in_rast->depthBiasSlopeFactor;
 
    if (in_vp) {
       pipeline->vp.count = in_vp->viewportCount;
@@ -1410,10 +1446,8 @@ dzn_graphics_pipeline_translate_ms(struct dzn_graphics_pipeline *pipeline,
                                    D3D12_PIPELINE_STATE_STREAM_DESC *out,
                                    const VkGraphicsPipelineCreateInfo *in)
 {
-   const VkPipelineRasterizationStateCreateInfo *in_rast =
-      in->pRasterizationState;
    const VkPipelineMultisampleStateCreateInfo *in_ms =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pMultisampleState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pMultisampleState;
 
    if (!in_ms)
       return;
@@ -1453,19 +1487,24 @@ translate_stencil_test(struct dzn_graphics_pipeline *pipeline,
 {
    const VkPipelineDepthStencilStateCreateInfo *in_zsa =
       in->pDepthStencilState;
+   VkCullModeFlags cull_mode =
+      (pipeline->dynamic & DZN_DYNAMIC_CULL_MODE) ? VK_CULL_MODE_NONE : in->pRasterizationState->cullMode;
+   bool dynamic_stencil =
+      pipeline->dynamic & (DZN_DYNAMIC_STENCIL_TEST_ENABLE | DZN_DYNAMIC_STENCIL_OP |
+                           DZN_DYNAMIC_DEPTH_TEST_ENABLE | DZN_DYNAMIC_DEPTH_COMPARE_OP);
 
-   bool front_test_uses_ref =
-      !(in->pRasterizationState->cullMode & VK_CULL_MODE_FRONT_BIT) &&
+   bool front_test_uses_ref = dynamic_stencil ||
+      (!(cull_mode & VK_CULL_MODE_FRONT_BIT) &&
       in_zsa->front.compareOp != VK_COMPARE_OP_NEVER &&
       in_zsa->front.compareOp != VK_COMPARE_OP_ALWAYS &&
       (pipeline->zsa.stencil_test.dynamic_compare_mask ||
-       in_zsa->front.compareMask != 0);
-   bool back_test_uses_ref =
-      !(in->pRasterizationState->cullMode & VK_CULL_MODE_BACK_BIT) &&
+       in_zsa->front.compareMask != 0));
+   bool back_test_uses_ref = dynamic_stencil ||
+      (!(cull_mode & VK_CULL_MODE_BACK_BIT) &&
       in_zsa->back.compareOp != VK_COMPARE_OP_NEVER &&
       in_zsa->back.compareOp != VK_COMPARE_OP_ALWAYS &&
       (pipeline->zsa.stencil_test.dynamic_compare_mask ||
-       in_zsa->back.compareMask != 0);
+       in_zsa->back.compareMask != 0));
 
    if (front_test_uses_ref && pipeline->zsa.stencil_test.dynamic_compare_mask)
       pipeline->zsa.stencil_test.front.compare_mask = UINT32_MAX;
@@ -1481,8 +1520,8 @@ translate_stencil_test(struct dzn_graphics_pipeline *pipeline,
    else
       pipeline->zsa.stencil_test.back.compare_mask = 0;
 
-   bool back_wr_uses_ref =
-      !(in->pRasterizationState->cullMode & VK_CULL_MODE_BACK_BIT) &&
+   bool back_wr_uses_ref = dynamic_stencil ||
+      (!(cull_mode & VK_CULL_MODE_BACK_BIT) &&
       ((in_zsa->back.compareOp != VK_COMPARE_OP_ALWAYS &&
         in_zsa->back.failOp == VK_STENCIL_OP_REPLACE) ||
        (in_zsa->back.compareOp != VK_COMPARE_OP_NEVER &&
@@ -1490,9 +1529,9 @@ translate_stencil_test(struct dzn_graphics_pipeline *pipeline,
         in_zsa->back.passOp == VK_STENCIL_OP_REPLACE) ||
        (in_zsa->depthTestEnable &&
         in_zsa->depthCompareOp != VK_COMPARE_OP_ALWAYS &&
-        in_zsa->back.depthFailOp == VK_STENCIL_OP_REPLACE));
-   bool front_wr_uses_ref =
-      !(in->pRasterizationState->cullMode & VK_CULL_MODE_FRONT_BIT) &&
+        in_zsa->back.depthFailOp == VK_STENCIL_OP_REPLACE)));
+   bool front_wr_uses_ref = dynamic_stencil ||
+      (!(cull_mode & VK_CULL_MODE_FRONT_BIT) &&
       ((in_zsa->front.compareOp != VK_COMPARE_OP_ALWAYS &&
         in_zsa->front.failOp == VK_STENCIL_OP_REPLACE) ||
        (in_zsa->front.compareOp != VK_COMPARE_OP_NEVER &&
@@ -1500,15 +1539,15 @@ translate_stencil_test(struct dzn_graphics_pipeline *pipeline,
         in_zsa->front.passOp == VK_STENCIL_OP_REPLACE) ||
        (in_zsa->depthTestEnable &&
         in_zsa->depthCompareOp != VK_COMPARE_OP_ALWAYS &&
-        in_zsa->front.depthFailOp == VK_STENCIL_OP_REPLACE));
+        in_zsa->front.depthFailOp == VK_STENCIL_OP_REPLACE)));
 
    pipeline->zsa.stencil_test.front.write_mask =
       (pipeline->zsa.stencil_test.dynamic_write_mask ||
-       (in->pRasterizationState->cullMode & VK_CULL_MODE_FRONT_BIT)) ?
+       (cull_mode & VK_CULL_MODE_FRONT_BIT)) ?
       0 : in_zsa->front.writeMask;
    pipeline->zsa.stencil_test.back.write_mask =
       (pipeline->zsa.stencil_test.dynamic_write_mask ||
-       (in->pRasterizationState->cullMode & VK_CULL_MODE_BACK_BIT)) ?
+       (cull_mode & VK_CULL_MODE_BACK_BIT)) ?
       0 : in_zsa->back.writeMask;
 
    pipeline->zsa.stencil_test.front.uses_ref = front_test_uses_ref || front_wr_uses_ref;
@@ -1534,14 +1573,29 @@ dzn_graphics_pipeline_translate_zsa(struct dzn_device *device,
    struct dzn_physical_device *pdev =
       container_of(device->vk.physical, struct dzn_physical_device, vk);
 
-   const VkPipelineRasterizationStateCreateInfo *in_rast =
-      in->pRasterizationState;
    const VkPipelineDepthStencilStateCreateInfo *in_zsa =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pDepthStencilState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pDepthStencilState;
    const VkPipelineRenderingCreateInfo *ri = vk_find_struct_const(in, PIPELINE_RENDERING_CREATE_INFO);
 
+   if (in_zsa) {
+      pipeline->statics.has_depth_stencil_state = true;
+      pipeline->statics.has_depth = !ri || ri->depthAttachmentFormat != VK_FORMAT_UNDEFINED;
+      pipeline->statics.has_stencil = !ri || ri->stencilAttachmentFormat != VK_FORMAT_UNDEFINED;
+      pipeline->statics.depth_test_enable = in_zsa->depthTestEnable;
+      pipeline->statics.depth_write_enable = in_zsa->depthWriteEnable;
+      pipeline->statics.depth_compare_op = in_zsa->depthCompareOp;
+      pipeline->statics.depth_bounds_test_enable = in_zsa->depthBoundsTestEnable;
+      pipeline->statics.stencil_test_enable = in_zsa->stencilTestEnable;
+      pipeline->statics.front = (struct dzn_stencil_op_state) {
+         in_zsa->front.failOp, in_zsa->front.passOp, in_zsa->front.depthFailOp, in_zsa->front.compareOp,
+      };
+      pipeline->statics.back = (struct dzn_stencil_op_state) {
+         in_zsa->back.failOp, in_zsa->back.passOp, in_zsa->back.depthFailOp, in_zsa->back.compareOp,
+      };
+   }
+
    if (!in_zsa ||
-       in_rast->cullMode == VK_CULL_MODE_FRONT_AND_BACK) {
+       dzn_graphics_pipeline_static_cull_all(pipeline, in)) {
       /* Ensure depth is disabled if the rasterizer should be disabled / everything culled */
       if (pdev->options14.IndependentFrontAndBackStencilRefMaskSupported) {
          d3d12_gfx_pipeline_state_stream_new_desc(out, DEPTH_STENCIL2, D3D12_DEPTH_STENCIL_DESC2, stream_desc);
@@ -1572,11 +1626,18 @@ dzn_graphics_pipeline_translate_zsa(struct dzn_device *device,
          dzn_translate_compare_op(in_zsa->depthCompareOp) :
          D3D12_COMPARISON_FUNC_ALWAYS;
    }
-   pipeline->zsa.depth_bounds.enable = in_zsa->depthBoundsTestEnable;
+   pipeline->zsa.depth_bounds.enable =
+      in_zsa->depthBoundsTestEnable ||
+      (pipeline->dynamic & DZN_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE);
    pipeline->zsa.depth_bounds.min = in_zsa->minDepthBounds;
    pipeline->zsa.depth_bounds.max = in_zsa->maxDepthBounds;
    desc.DepthBoundsTestEnable = in_zsa->depthBoundsTestEnable;
    desc.StencilEnable = in_zsa->stencilTestEnable && !has_no_stencil;
+   if (!desc.StencilEnable && !has_no_stencil &&
+       (pipeline->dynamic & (DZN_DYNAMIC_STENCIL_TEST_ENABLE | DZN_DYNAMIC_STENCIL_OP))) {
+      pipeline->zsa.stencil_test.enable = true;
+      translate_stencil_test(pipeline, &desc, in);
+   }
    if (desc.StencilEnable) {
       desc.FrontFace.StencilFailOp = translate_stencil_op(in_zsa->front.failOp);
       desc.FrontFace.StencilDepthFailOp = translate_stencil_op(in_zsa->front.depthFailOp);
@@ -1701,12 +1762,10 @@ dzn_graphics_pipeline_translate_blend(struct dzn_graphics_pipeline *pipeline,
                                       D3D12_PIPELINE_STATE_STREAM_DESC *out,
                                       const VkGraphicsPipelineCreateInfo *in)
 {
-   const VkPipelineRasterizationStateCreateInfo *in_rast =
-      in->pRasterizationState;
    const VkPipelineColorBlendStateCreateInfo *in_blend =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pColorBlendState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pColorBlendState;
    const VkPipelineMultisampleStateCreateInfo *in_ms =
-      in_rast->rasterizerDiscardEnable ? NULL : in->pMultisampleState;
+      dzn_graphics_pipeline_static_rast_discard(pipeline, in) ? NULL : in->pMultisampleState;
 
    if (!in_blend || !in_ms)
       return;
@@ -1975,6 +2034,58 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
          case VK_DYNAMIC_STATE_LINE_WIDTH:
             /* Nothing to do since we just support lineWidth = 1. */
             break;
+         case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY:
+            pipeline->dynamic |= DZN_DYNAMIC_PRIMITIVE_TOPOLOGY;
+            break;
+         case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT:
+            pipeline->dynamic |= DZN_DYNAMIC_VIEWPORT_WITH_COUNT;
+            pipeline->vp.dynamic = true;
+            break;
+         case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT:
+            pipeline->dynamic |= DZN_DYNAMIC_SCISSOR_WITH_COUNT;
+            pipeline->scissor.dynamic = true;
+            break;
+         case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE:
+            pipeline->dynamic |= DZN_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE;
+            break;
+         case VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE:
+            pipeline->dynamic |= DZN_DYNAMIC_RASTERIZER_DISCARD_ENABLE;
+            break;
+         case VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE:
+            pipeline->dynamic |= DZN_DYNAMIC_PRIMITIVE_RESTART_ENABLE;
+            break;
+         case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE:
+            pipeline->dynamic |= DZN_DYNAMIC_DEPTH_BIAS_ENABLE;
+            if (pdev->options16.DynamicDepthBiasSupported) {
+               *flags |= D3D12_PIPELINE_STATE_FLAG_DYNAMIC_DEPTH_BIAS;
+            } else {
+               ret = dzn_graphics_pipeline_prepare_for_variants(device, pipeline);
+               if (ret)
+                  goto out;
+            }
+            break;
+         case VK_DYNAMIC_STATE_CULL_MODE:
+         case VK_DYNAMIC_STATE_FRONT_FACE:
+         case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE:
+         case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE:
+         case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP:
+         case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE:
+         case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE:
+         case VK_DYNAMIC_STATE_STENCIL_OP:
+            switch (pCreateInfo->pDynamicState->pDynamicStates[i]) {
+            case VK_DYNAMIC_STATE_CULL_MODE: pipeline->dynamic |= DZN_DYNAMIC_CULL_MODE; break;
+            case VK_DYNAMIC_STATE_FRONT_FACE: pipeline->dynamic |= DZN_DYNAMIC_FRONT_FACE; break;
+            case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE: pipeline->dynamic |= DZN_DYNAMIC_DEPTH_TEST_ENABLE; break;
+            case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE: pipeline->dynamic |= DZN_DYNAMIC_DEPTH_WRITE_ENABLE; break;
+            case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP: pipeline->dynamic |= DZN_DYNAMIC_DEPTH_COMPARE_OP; break;
+            case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE: pipeline->dynamic |= DZN_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE; break;
+            case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE: pipeline->dynamic |= DZN_DYNAMIC_STENCIL_TEST_ENABLE; break;
+            default: pipeline->dynamic |= DZN_DYNAMIC_STENCIL_OP; break;
+            }
+            ret = dzn_graphics_pipeline_prepare_for_variants(device, pipeline);
+            if (ret)
+               goto out;
+            break;
          default: UNREACHABLE("Unsupported dynamic state");
          }
       }
@@ -2118,6 +2229,18 @@ mask_key_for_stencil_state(struct dzn_physical_device *pdev,
                            const struct dzn_graphics_pipeline_variant_key *key,
                            struct dzn_graphics_pipeline_variant_key *masked_key)
 {
+   if (pipeline->dynamic & (DZN_DYNAMIC_STENCIL_TEST_ENABLE | DZN_DYNAMIC_STENCIL_OP)) {
+      if (pipeline->zsa.stencil_test.dynamic_compare_mask) {
+         masked_key->stencil_test.front.compare_mask = key->stencil_test.front.compare_mask;
+         masked_key->stencil_test.back.compare_mask = key->stencil_test.back.compare_mask;
+      }
+      if (pipeline->zsa.stencil_test.dynamic_write_mask) {
+         masked_key->stencil_test.front.write_mask = key->stencil_test.front.write_mask;
+         masked_key->stencil_test.back.write_mask = key->stencil_test.back.write_mask;
+      }
+      return;
+   }
+
    if (pdev->options14.IndependentFrontAndBackStencilRefMaskSupported) {
       const D3D12_DEPTH_STENCIL_DESC2 *ds_templ =
          dzn_graphics_pipeline_get_desc_template(pipeline, ds);
@@ -2212,6 +2335,94 @@ update_stencil_state(struct dzn_physical_device *pdev,
    }
 }
 
+static void
+mask_key_for_dynamic_state(struct dzn_graphics_pipeline *pipeline,
+                           const struct dzn_graphics_pipeline_variant_key *key,
+                           struct dzn_graphics_pipeline_variant_key *masked_key)
+{
+   uint32_t dyn = pipeline->dynamic;
+
+   if (dyn & (DZN_DYNAMIC_CULL_MODE | DZN_DYNAMIC_FRONT_FACE)) {
+      masked_key->cull_mode = (dyn & DZN_DYNAMIC_CULL_MODE) ?
+         key->cull_mode : pipeline->statics.cull_mode;
+      masked_key->front_ccw = (dyn & DZN_DYNAMIC_FRONT_FACE) ?
+         key->front_ccw : pipeline->statics.front_ccw;
+   }
+
+   if ((dyn & DZN_DYNAMIC_DEPTH_STENCIL_MASK) && pipeline->statics.has_depth_stencil_state) {
+      masked_key->zs.depth_test_enable = (dyn & DZN_DYNAMIC_DEPTH_TEST_ENABLE) ?
+         key->zs.depth_test_enable : pipeline->statics.depth_test_enable;
+      masked_key->zs.depth_write_enable = (dyn & DZN_DYNAMIC_DEPTH_WRITE_ENABLE) ?
+         key->zs.depth_write_enable : pipeline->statics.depth_write_enable;
+      masked_key->zs.depth_compare_op = (dyn & DZN_DYNAMIC_DEPTH_COMPARE_OP) ?
+         key->zs.depth_compare_op : pipeline->statics.depth_compare_op;
+      masked_key->zs.depth_bounds_test_enable = (dyn & DZN_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE) ?
+         key->zs.depth_bounds_test_enable : pipeline->statics.depth_bounds_test_enable;
+      masked_key->zs.stencil_test_enable = (dyn & DZN_DYNAMIC_STENCIL_TEST_ENABLE) ?
+         key->zs.stencil_test_enable : pipeline->statics.stencil_test_enable;
+      masked_key->zs.front = (dyn & DZN_DYNAMIC_STENCIL_OP) ?
+         key->zs.front : pipeline->statics.front;
+      masked_key->zs.back = (dyn & DZN_DYNAMIC_STENCIL_OP) ?
+         key->zs.back : pipeline->statics.back;
+   }
+}
+
+static void
+update_depth_stencil_state(struct dzn_physical_device *pdev,
+                           struct dzn_graphics_pipeline *pipeline,
+                           uintptr_t *stream_buf,
+                           const struct dzn_graphics_pipeline_variant_key *masked_key)
+{
+   if (!(pipeline->dynamic & DZN_DYNAMIC_DEPTH_STENCIL_MASK) ||
+       !pipeline->statics.has_depth_stencil_state)
+      return;
+
+   bool depth_enable = pipeline->statics.has_depth &&
+      (masked_key->zs.depth_test_enable || masked_key->zs.depth_bounds_test_enable);
+   D3D12_DEPTH_WRITE_MASK write_mask = depth_enable && masked_key->zs.depth_write_enable ?
+      D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+   D3D12_COMPARISON_FUNC depth_func = masked_key->zs.depth_test_enable ?
+      dzn_translate_compare_op(masked_key->zs.depth_compare_op) :
+      D3D12_COMPARISON_FUNC_ALWAYS;
+   bool stencil_enable = pipeline->statics.has_stencil && masked_key->zs.stencil_test_enable;
+
+   if (pdev->options14.IndependentFrontAndBackStencilRefMaskSupported) {
+      D3D12_DEPTH_STENCIL_DESC2 *ds = dzn_graphics_pipeline_get_desc(pipeline, stream_buf, ds);
+      if (!ds)
+         return;
+      ds->DepthEnable = depth_enable;
+      ds->DepthWriteMask = write_mask;
+      ds->DepthFunc = depth_func;
+      ds->DepthBoundsTestEnable = masked_key->zs.depth_bounds_test_enable;
+      ds->StencilEnable = stencil_enable;
+      ds->FrontFace.StencilFailOp = translate_stencil_op(masked_key->zs.front.fail_op);
+      ds->FrontFace.StencilPassOp = translate_stencil_op(masked_key->zs.front.pass_op);
+      ds->FrontFace.StencilDepthFailOp = translate_stencil_op(masked_key->zs.front.depth_fail_op);
+      ds->FrontFace.StencilFunc = dzn_translate_compare_op(masked_key->zs.front.compare_op);
+      ds->BackFace.StencilFailOp = translate_stencil_op(masked_key->zs.back.fail_op);
+      ds->BackFace.StencilPassOp = translate_stencil_op(masked_key->zs.back.pass_op);
+      ds->BackFace.StencilDepthFailOp = translate_stencil_op(masked_key->zs.back.depth_fail_op);
+      ds->BackFace.StencilFunc = dzn_translate_compare_op(masked_key->zs.back.compare_op);
+   } else {
+      D3D12_DEPTH_STENCIL_DESC1 *ds = dzn_graphics_pipeline_get_desc(pipeline, stream_buf, ds);
+      if (!ds)
+         return;
+      ds->DepthEnable = depth_enable;
+      ds->DepthWriteMask = write_mask;
+      ds->DepthFunc = depth_func;
+      ds->DepthBoundsTestEnable = masked_key->zs.depth_bounds_test_enable;
+      ds->StencilEnable = stencil_enable;
+      ds->FrontFace.StencilFailOp = translate_stencil_op(masked_key->zs.front.fail_op);
+      ds->FrontFace.StencilPassOp = translate_stencil_op(masked_key->zs.front.pass_op);
+      ds->FrontFace.StencilDepthFailOp = translate_stencil_op(masked_key->zs.front.depth_fail_op);
+      ds->FrontFace.StencilFunc = dzn_translate_compare_op(masked_key->zs.front.compare_op);
+      ds->BackFace.StencilFailOp = translate_stencil_op(masked_key->zs.back.fail_op);
+      ds->BackFace.StencilPassOp = translate_stencil_op(masked_key->zs.back.pass_op);
+      ds->BackFace.StencilDepthFailOp = translate_stencil_op(masked_key->zs.back.depth_fail_op);
+      ds->BackFace.StencilFunc = dzn_translate_compare_op(masked_key->zs.back.compare_op);
+   }
+}
+
 ID3D12PipelineState *
 dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
                                 const struct dzn_graphics_pipeline_variant_key *key)
@@ -2226,15 +2437,30 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
 
    struct dzn_graphics_pipeline_variant_key masked_key = { 0 };
 
-   if (dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut))
-      masked_key.ib_strip_cut = key->ib_strip_cut;
+   if (dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut)) {
+      bool restart = (pipeline->dynamic & DZN_DYNAMIC_PRIMITIVE_RESTART_ENABLE) ?
+         key->primitive_restart_enable : pipeline->statics.primitive_restart;
+      masked_key.ib_strip_cut = restart ?
+         key->ib_strip_cut : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+   }
 
    if (!pdev->options16.DynamicDepthBiasSupported &&
        dzn_graphics_pipeline_get_desc_template(pipeline, rast) &&
-       pipeline->zsa.dynamic_depth_bias)
-      masked_key.depth_bias = key->depth_bias;
+       (pipeline->zsa.dynamic_depth_bias ||
+        (pipeline->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE))) {
+      bool enable = (pipeline->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE) ?
+         key->depth_bias_enable : pipeline->statics.depth_bias_enable;
+      if (enable && pipeline->zsa.dynamic_depth_bias) {
+         masked_key.depth_bias = key->depth_bias;
+      } else if (enable) {
+         masked_key.depth_bias.constant_factor = pipeline->statics.depth_bias_constant;
+         masked_key.depth_bias.clamp = pipeline->statics.depth_bias_clamp;
+         masked_key.depth_bias.slope_factor = pipeline->statics.depth_bias_slope;
+      }
+   }
 
    mask_key_for_stencil_state(pdev, pipeline, key, &masked_key);
+   mask_key_for_dynamic_state(pipeline, key, &masked_key);
 
    struct hash_entry *he =
       _mesa_hash_table_search(pipeline->variants, &masked_key);
@@ -2260,12 +2486,20 @@ dzn_graphics_pipeline_get_state(struct dzn_graphics_pipeline *pipeline,
 
       D3D12_RASTERIZER_DESC *rast =
          dzn_graphics_pipeline_get_desc(pipeline, stream_buf, rast);
-      if (!pdev->options16.DynamicDepthBiasSupported && rast && pipeline->zsa.dynamic_depth_bias) {
+      if (!pdev->options16.DynamicDepthBiasSupported && rast &&
+          (pipeline->zsa.dynamic_depth_bias ||
+           (pipeline->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE))) {
          rast->DepthBias = translate_depth_bias(masked_key.depth_bias.constant_factor);
          rast->DepthBiasClamp = masked_key.depth_bias.clamp;
          rast->SlopeScaledDepthBias = masked_key.depth_bias.slope_factor;
       }
 
+      if (rast && (pipeline->dynamic & (DZN_DYNAMIC_CULL_MODE | DZN_DYNAMIC_FRONT_FACE))) {
+         rast->CullMode = translate_cull_mode(masked_key.cull_mode);
+         rast->FrontCounterClockwise = masked_key.front_ccw;
+      }
+
+      update_depth_stencil_state(pdev, pipeline, stream_buf, &masked_key);
       update_stencil_state(pdev, pipeline, stream_buf, &masked_key);
 
       ASSERTED HRESULT hres = ID3D12Device4_CreatePipelineState(device->dev, &stream_desc,

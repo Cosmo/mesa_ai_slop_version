@@ -155,6 +155,8 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
 #if defined(_WIN32)
       .EXT_external_memory_host              = pdev->dev13,
 #endif
+      .EXT_extended_dynamic_state            = true,
+      .EXT_extended_dynamic_state2           = true,
       .EXT_image_robustness                  = true,
       .EXT_inline_uniform_block              = true,
       .EXT_scalar_block_layout               = true,
@@ -822,6 +824,11 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .vertexAttributeInstanceRateDivisor = true,
       .vertexAttributeInstanceRateZeroDivisor = true,
       .shaderReplicatedComposites         = true,
+
+      .extendedDynamicState               = true,
+      .extendedDynamicState2              = true,
+      .extendedDynamicState2LogicOp       = false,
+      .extendedDynamicState2PatchControlPoints = false,
    };
 }
 

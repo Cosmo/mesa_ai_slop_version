@@ -389,6 +389,36 @@ enum dzn_cmd_dirty {
    DZN_CMD_DIRTY_DEPTH_BIAS = 1 << 8,
 };
 
+enum dzn_dynamic_state {
+   DZN_DYNAMIC_CULL_MODE = 1 << 0,
+   DZN_DYNAMIC_FRONT_FACE = 1 << 1,
+   DZN_DYNAMIC_PRIMITIVE_TOPOLOGY = 1 << 2,
+   DZN_DYNAMIC_VIEWPORT_WITH_COUNT = 1 << 3,
+   DZN_DYNAMIC_SCISSOR_WITH_COUNT = 1 << 4,
+   DZN_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE = 1 << 5,
+   DZN_DYNAMIC_DEPTH_TEST_ENABLE = 1 << 6,
+   DZN_DYNAMIC_DEPTH_WRITE_ENABLE = 1 << 7,
+   DZN_DYNAMIC_DEPTH_COMPARE_OP = 1 << 8,
+   DZN_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE = 1 << 9,
+   DZN_DYNAMIC_STENCIL_TEST_ENABLE = 1 << 10,
+   DZN_DYNAMIC_STENCIL_OP = 1 << 11,
+   DZN_DYNAMIC_RASTERIZER_DISCARD_ENABLE = 1 << 12,
+   DZN_DYNAMIC_DEPTH_BIAS_ENABLE = 1 << 13,
+   DZN_DYNAMIC_PRIMITIVE_RESTART_ENABLE = 1 << 14,
+};
+
+#define DZN_DYNAMIC_DEPTH_STENCIL_MASK \
+   (DZN_DYNAMIC_DEPTH_TEST_ENABLE | DZN_DYNAMIC_DEPTH_WRITE_ENABLE | \
+    DZN_DYNAMIC_DEPTH_COMPARE_OP | DZN_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE | \
+    DZN_DYNAMIC_STENCIL_TEST_ENABLE | DZN_DYNAMIC_STENCIL_OP)
+
+struct dzn_stencil_op_state {
+   uint32_t fail_op;
+   uint32_t pass_op;
+   uint32_t depth_fail_op;
+   uint32_t compare_op;
+};
+
 #define MAX_VBS D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT
 #define MAX_VP D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
 #define MAX_SCISSOR D3D12_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
@@ -577,6 +607,18 @@ struct dzn_graphics_pipeline_variant_key {
          uint32_t ref, compare_mask, write_mask;
       } front, back;
    } stencil_test;
+   uint32_t cull_mode;
+   uint32_t front_ccw;
+   uint32_t depth_bias_enable;
+   uint32_t primitive_restart_enable;
+   struct {
+      uint32_t depth_test_enable;
+      uint32_t depth_write_enable;
+      uint32_t depth_compare_op;
+      uint32_t depth_bounds_test_enable;
+      uint32_t stencil_test_enable;
+      struct dzn_stencil_op_state front, back;
+   } zs;
 };
 
 struct dzn_graphics_pipeline_variant {
@@ -605,6 +647,12 @@ struct dzn_cmd_buffer_state {
       BITSET_DECLARE(dirty, MAX_VBS);
       D3D12_VERTEX_BUFFER_VIEW views[MAX_VBS];
    } vb;
+   struct {
+      VkPrimitiveTopology topology;
+      uint32_t viewport_count;
+      uint32_t scissor_count;
+      bool rasterizer_discard;
+   } dyn;
    struct {
       D3D12_INDEX_BUFFER_VIEW view;
    } ib;
@@ -1014,6 +1062,27 @@ struct dzn_graphics_pipeline {
    bool use_gs_for_polygon_mode_point;
    bool needs_draw_sysvals;
 
+   uint32_t dynamic;
+   struct {
+      VkPrimitiveTopology topology;
+      bool primitive_restart;
+      VkCullModeFlags cull_mode;
+      bool front_ccw;
+      bool depth_bias_enable;
+      float depth_bias_constant;
+      float depth_bias_clamp;
+      float depth_bias_slope;
+      bool has_depth_stencil_state;
+      bool has_depth;
+      bool has_stencil;
+      bool depth_test_enable;
+      bool depth_write_enable;
+      VkCompareOp depth_compare_op;
+      bool depth_bounds_test_enable;
+      bool stencil_test_enable;
+      struct dzn_stencil_op_state front, back;
+   } statics;
+
    struct {
       uint32_t view_mask;
       bool native_view_instancing;
@@ -1056,6 +1125,11 @@ dzn_graphics_pipeline_get_indirect_cmd_sig(struct dzn_graphics_pipeline *pipelin
                                            struct dzn_indirect_draw_cmd_sig_key key);
 
 VkFormat dzn_graphics_pipeline_patch_vi_format(VkFormat format);
+
+D3D12_PRIMITIVE_TOPOLOGY
+dzn_translate_primitive_topology(const struct dzn_physical_device *pdev,
+                                 VkPrimitiveTopology topology,
+                                 bool *triangle_fan);
 
 struct dzn_compute_pipeline {
    struct dzn_pipeline base;

@@ -3183,6 +3183,44 @@ dzn_cmd_buffer_resolve_region(struct dzn_cmd_buffer *cmdbuf,
    }
 }
 
+static bool
+dzn_cmd_buffer_triangle_fan(const struct dzn_cmd_buffer *cmdbuf,
+                            const struct dzn_graphics_pipeline *pipeline)
+{
+   if (!(pipeline->dynamic & DZN_DYNAMIC_PRIMITIVE_TOPOLOGY))
+      return pipeline->ia.triangle_fan;
+
+   struct dzn_physical_device *pdev =
+      container_of(cmdbuf->vk.base.device->physical, struct dzn_physical_device, vk);
+   bool triangle_fan;
+   dzn_translate_primitive_topology(pdev, cmdbuf->state.dyn.topology, &triangle_fan);
+   return triangle_fan;
+}
+
+static bool
+dzn_cmd_buffer_primitive_restart(const struct dzn_cmd_buffer *cmdbuf,
+                                 const struct dzn_graphics_pipeline *pipeline)
+{
+   if (!dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut))
+      return false;
+
+   return (pipeline->dynamic & DZN_DYNAMIC_PRIMITIVE_RESTART_ENABLE) ?
+          cmdbuf->state.pipeline_variant.primitive_restart_enable :
+          pipeline->statics.primitive_restart;
+}
+
+static bool
+dzn_cmd_buffer_rasterization_disabled(const struct dzn_cmd_buffer *cmdbuf,
+                                      const struct dzn_graphics_pipeline *pipeline)
+{
+   if ((pipeline->dynamic & DZN_DYNAMIC_RASTERIZER_DISCARD_ENABLE) &&
+       cmdbuf->state.dyn.rasterizer_discard)
+      return true;
+
+   return (pipeline->dynamic & DZN_DYNAMIC_CULL_MODE) &&
+          cmdbuf->state.pipeline_variant.cull_mode == VK_CULL_MODE_FRONT_AND_BACK;
+}
+
 static void
 dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint)
 {
@@ -3228,7 +3266,15 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
       if (bindpoint == VK_PIPELINE_BIND_POINT_GRAPHICS) {
          struct dzn_graphics_pipeline *gfx =
             (struct dzn_graphics_pipeline *)pipeline;
-         ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, gfx->ia.topology);
+         D3D12_PRIMITIVE_TOPOLOGY topology = gfx->ia.topology;
+         if (gfx->dynamic & DZN_DYNAMIC_PRIMITIVE_TOPOLOGY) {
+            struct dzn_physical_device *pdev =
+               container_of(device->vk.physical, struct dzn_physical_device, vk);
+            bool triangle_fan;
+            topology = dzn_translate_primitive_topology(pdev, cmdbuf->state.dyn.topology,
+                                                        &triangle_fan);
+         }
+         ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, topology);
          dzn_graphics_pipeline_get_state(gfx, &cmdbuf->state.pipeline_variant);
          if (gfx->multiview.native_view_instancing)
             view_instance_mask = gfx->multiview.view_mask;
@@ -3463,11 +3509,13 @@ dzn_cmd_buffer_update_viewports(struct dzn_cmd_buffer *cmdbuf)
    const struct dzn_graphics_pipeline *pipeline =
       (const struct dzn_graphics_pipeline *)cmdbuf->state.pipeline;
 
-   if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_VIEWPORTS) ||
-       !pipeline->vp.count)
+   uint32_t count = (pipeline->dynamic & DZN_DYNAMIC_VIEWPORT_WITH_COUNT) ?
+      cmdbuf->state.dyn.viewport_count : pipeline->vp.count;
+
+   if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_VIEWPORTS) || !count)
       return;
 
-   ID3D12GraphicsCommandList1_RSSetViewports(cmdbuf->cmdlist, pipeline->vp.count, cmdbuf->state.viewports);
+   ID3D12GraphicsCommandList1_RSSetViewports(cmdbuf->cmdlist, count, cmdbuf->state.viewports);
 }
 
 static void
@@ -3479,7 +3527,24 @@ dzn_cmd_buffer_update_scissors(struct dzn_cmd_buffer *cmdbuf)
    if (!(cmdbuf->state.dirty & DZN_CMD_DIRTY_SCISSORS))
       return;
 
-   if (!pipeline->scissor.count) {
+   uint32_t count = (pipeline->dynamic & DZN_DYNAMIC_SCISSOR_WITH_COUNT) ?
+      cmdbuf->state.dyn.scissor_count : pipeline->scissor.count;
+
+   if (dzn_cmd_buffer_rasterization_disabled(cmdbuf, pipeline)) {
+      D3D12_RECT empty[MAX_SCISSOR];
+      for (uint32_t i = 0; i < ARRAY_SIZE(empty); i++) {
+         empty[i] = (D3D12_RECT) {
+            .left = D3D12_VIEWPORT_BOUNDS_MAX - 1,
+            .top = D3D12_VIEWPORT_BOUNDS_MAX - 1,
+            .right = D3D12_VIEWPORT_BOUNDS_MAX,
+            .bottom = D3D12_VIEWPORT_BOUNDS_MAX,
+         };
+      }
+      ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, MAX2(count, 1), empty);
+      return;
+   }
+
+   if (!count) {
       /* Apply a scissor delimiting the render area. */
       ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, 1, &cmdbuf->state.render.area);
       return;
@@ -3487,15 +3552,15 @@ dzn_cmd_buffer_update_scissors(struct dzn_cmd_buffer *cmdbuf)
 
    D3D12_RECT scissors[MAX_SCISSOR];
 
-   memcpy(scissors, cmdbuf->state.scissors, sizeof(D3D12_RECT) * pipeline->scissor.count);
-   for (uint32_t i = 0; i < pipeline->scissor.count; i++) {
+   memcpy(scissors, cmdbuf->state.scissors, sizeof(D3D12_RECT) * count);
+   for (uint32_t i = 0; i < count; i++) {
       scissors[i].left = MAX2(scissors[i].left, cmdbuf->state.render.area.left);
       scissors[i].top = MAX2(scissors[i].top, cmdbuf->state.render.area.top);
       scissors[i].right = MIN2(scissors[i].right, cmdbuf->state.render.area.right);
       scissors[i].bottom = MIN2(scissors[i].bottom, cmdbuf->state.render.area.bottom);
    }
 
-   ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, pipeline->scissor.count, scissors);
+   ID3D12GraphicsCommandList1_RSSetScissorRects(cmdbuf->cmdlist, count, scissors);
 }
 
 static void
@@ -3588,12 +3653,17 @@ dzn_cmd_buffer_update_depth_bounds(struct dzn_cmd_buffer *cmdbuf)
 static void
 dzn_cmd_buffer_update_depth_bias(struct dzn_cmd_buffer *cmdbuf)
 {
-   if (cmdbuf->state.dirty & DZN_CMD_DIRTY_DEPTH_BIAS) {
+   const struct dzn_graphics_pipeline *gfx = (const struct dzn_graphics_pipeline *)
+      cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
+
+   if ((cmdbuf->state.dirty & DZN_CMD_DIRTY_DEPTH_BIAS) &&
+       (gfx->zsa.dynamic_depth_bias || (gfx->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE))) {
       assert(cmdbuf->cmdlist9);
+      bool enable = cmdbuf->state.pipeline_variant.depth_bias_enable;
       ID3D12GraphicsCommandList9_RSSetDepthBias(cmdbuf->cmdlist9,
-                                                cmdbuf->state.pipeline_variant.depth_bias.constant_factor,
-                                                cmdbuf->state.pipeline_variant.depth_bias.clamp,
-                                                cmdbuf->state.pipeline_variant.depth_bias.slope_factor);
+                                                enable ? cmdbuf->state.pipeline_variant.depth_bias.constant_factor : 0,
+                                                enable ? cmdbuf->state.pipeline_variant.depth_bias.clamp : 0,
+                                                enable ? cmdbuf->state.pipeline_variant.depth_bias.slope_factor : 0);
    }
 }
 
@@ -3679,7 +3749,7 @@ dzn_cmd_buffer_triangle_fan_rewrite_index(struct dzn_cmd_buffer *cmdbuf,
    ASSERTED const struct dzn_graphics_pipeline *gfx_pipeline = (const struct dzn_graphics_pipeline *)
       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
    ASSERTED bool prim_restart =
-      dzn_graphics_pipeline_get_desc_template(gfx_pipeline, ib_strip_cut) != NULL;
+      dzn_cmd_buffer_primitive_restart(cmdbuf, gfx_pipeline);
 
    assert(!prim_restart);
 
@@ -3760,7 +3830,7 @@ dzn_cmd_buffer_triangle_fan_get_max_index_buf_size(struct dzn_cmd_buffer *cmdbuf
    struct dzn_graphics_pipeline *pipeline = (struct dzn_graphics_pipeline *)
       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
 
-   if (!pipeline->ia.triangle_fan)
+   if (!dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline))
       return 0;
 
    uint32_t max_triangles;
@@ -4037,7 +4107,7 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
       sizeof(D3D12_DRAW_INDEXED_ARGUMENTS) :
       sizeof(D3D12_DRAW_ARGUMENTS);
    bool prim_restart =
-      dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut) != NULL;
+      dzn_cmd_buffer_primitive_restart(cmdbuf, pipeline);
 
    draw_buf_stride = draw_buf_stride ? draw_buf_stride : min_draw_buf_stride;
    assert(draw_buf_stride >= min_draw_buf_stride);
@@ -4051,7 +4121,7 @@ dzn_cmd_buffer_indirect_draw(struct dzn_cmd_buffer *cmdbuf,
    draw_type.indirect_count = count_buf != NULL;
    draw_type.draw_params = pipeline->needs_draw_sysvals && !pdev->options21.ExtendedCommandInfoSupported;
    draw_type.draw_id = max_draw_count > 1 && pdev->options21.ExecuteIndirectTier < D3D12_EXECUTE_INDIRECT_TIER_1_1;
-   draw_type.triangle_fan = pipeline->ia.triangle_fan;
+   draw_type.triangle_fan = dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline);
    draw_type.triangle_fan_primitive_restart = draw_type.triangle_fan && prim_restart;
 
    if (draw_type.draw_params || draw_type.draw_id || draw_type.triangle_fan) {
@@ -5148,11 +5218,30 @@ dzn_CmdBindPipeline(VkCommandBuffer commandBuffer,
          cmdbuf->state.dirty |= DZN_CMD_DIRTY_BLEND_CONSTANTS;
       }
 
-      for (uint32_t vb = 0; vb < gfx->vb.count; vb++)
-         cmdbuf->state.vb.views[vb].StrideInBytes = gfx->vb.strides[vb];
+      if (!(gfx->dynamic & DZN_DYNAMIC_VERTEX_INPUT_BINDING_STRIDE)) {
+         for (uint32_t vb = 0; vb < gfx->vb.count; vb++)
+            cmdbuf->state.vb.views[vb].StrideInBytes = gfx->vb.strides[vb];
+      }
 
       if (gfx->vb.count > 0)
          BITSET_SET_COUNT(cmdbuf->state.vb.dirty, 0, gfx->vb.count);
+
+      cmdbuf->state.dirty |= DZN_CMD_DIRTY_SCISSORS;
+
+      if (gfx->zsa.dynamic_depth_bias || (gfx->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE)) {
+         struct dzn_physical_device *pdev =
+            container_of(cmdbuf->vk.base.device->physical, struct dzn_physical_device, vk);
+
+         if (!gfx->zsa.dynamic_depth_bias) {
+            cmdbuf->state.pipeline_variant.depth_bias.constant_factor = gfx->statics.depth_bias_constant;
+            cmdbuf->state.pipeline_variant.depth_bias.clamp = gfx->statics.depth_bias_clamp;
+            cmdbuf->state.pipeline_variant.depth_bias.slope_factor = gfx->statics.depth_bias_slope;
+         }
+         if (!(gfx->dynamic & DZN_DYNAMIC_DEPTH_BIAS_ENABLE))
+            cmdbuf->state.pipeline_variant.depth_bias_enable = gfx->statics.depth_bias_enable;
+         if (pdev->options16.DynamicDepthBiasSupported)
+            cmdbuf->state.dirty |= DZN_CMD_DIRTY_DEPTH_BIAS;
+      }
    }
 }
 
@@ -5290,7 +5379,7 @@ dzn_CmdDraw(VkCommandBuffer commandBuffer,
    uint32_t view_mask = pipeline->multiview.native_view_instancing ?
       1 : pipeline->multiview.view_mask;
 
-   if (pipeline->ia.triangle_fan) {
+   if (dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline)) {
       D3D12_INDEX_BUFFER_VIEW ib_view = cmdbuf->state.ib.view;
 
       VkResult result =
@@ -5339,8 +5428,8 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
    const struct dzn_graphics_pipeline *pipeline = (const struct dzn_graphics_pipeline *)
       cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].pipeline;
 
-   if (pipeline->ia.triangle_fan &&
-       dzn_graphics_pipeline_get_desc_template(pipeline, ib_strip_cut)) {
+   if (dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline) &&
+       dzn_cmd_buffer_primitive_restart(cmdbuf, pipeline)) {
       /* The indexed+primitive-restart+triangle-fan combination is a mess,
        * since we have to walk the index buffer, skip entries with the
        * special 0xffff/0xffffffff values, and push triangle list indices
@@ -5383,7 +5472,7 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
 
    D3D12_INDEX_BUFFER_VIEW ib_view = cmdbuf->state.ib.view;
 
-   if (pipeline->ia.triangle_fan) {
+   if (dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline)) {
       VkResult result =
          dzn_cmd_buffer_triangle_fan_rewrite_index(cmdbuf, &indexCount, &firstIndex);
       if (result != VK_SUCCESS || !indexCount)
@@ -5403,7 +5492,7 @@ dzn_CmdDrawIndexed(VkCommandBuffer commandBuffer,
    }
 
    /* Restore the IB view if we modified it when lowering triangle fans. */
-   if (pipeline->ia.triangle_fan && ib_view.SizeInBytes) {
+   if (dzn_cmd_buffer_triangle_fan(cmdbuf, pipeline) && ib_view.SizeInBytes) {
       cmdbuf->state.ib.view = ib_view;
       cmdbuf->state.dirty |= DZN_CMD_DIRTY_IB;
    }
@@ -5490,6 +5579,35 @@ dzn_CmdBindVertexBuffers(VkCommandBuffer commandBuffer,
 
       vbviews[firstBinding + i].BufferLocation = buf->gpuva + pOffsets[i];
       vbviews[firstBinding + i].SizeInBytes = buf->size - pOffsets[i];
+   }
+
+   BITSET_SET_COUNT(cmdbuf->state.vb.dirty, firstBinding, bindingCount);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer,
+                          uint32_t firstBinding,
+                          uint32_t bindingCount,
+                          const VkBuffer *pBuffers,
+                          const VkDeviceSize *pOffsets,
+                          const VkDeviceSize *pSizes,
+                          const VkDeviceSize *pStrides)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   if (!bindingCount)
+      return;
+
+   D3D12_VERTEX_BUFFER_VIEW *vbviews = cmdbuf->state.vb.views;
+
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      VK_FROM_HANDLE(dzn_buffer, buf, pBuffers[i]);
+
+      vbviews[firstBinding + i].BufferLocation = buf->gpuva + pOffsets[i];
+      vbviews[firstBinding + i].SizeInBytes =
+         pSizes && pSizes[i] != VK_WHOLE_SIZE ? pSizes[i] : buf->size - pOffsets[i];
+      if (pStrides)
+         vbviews[firstBinding + i].StrideInBytes = pStrides[i];
    }
 
    BITSET_SET_COUNT(cmdbuf->state.vb.dirty, firstBinding, bindingCount);
@@ -6005,6 +6123,170 @@ dzn_CmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
 
    cmdbuf->state.dirty |= DZN_CMD_DIRTY_STENCIL_WRITE_MASK;
    cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+}
+
+static void
+dzn_cmd_buffer_dirty_pipeline(struct dzn_cmd_buffer *cmdbuf)
+{
+   cmdbuf->state.bindpoint[VK_PIPELINE_BIND_POINT_GRAPHICS].dirty |= DZN_CMD_BINDPOINT_DIRTY_PIPELINE;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetCullMode(VkCommandBuffer commandBuffer,
+                   VkCullModeFlags cullMode)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.cull_mode = cullMode;
+   cmdbuf->state.dirty |= DZN_CMD_DIRTY_SCISSORS;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetFrontFace(VkCommandBuffer commandBuffer,
+                    VkFrontFace frontFace)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.front_ccw = frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetPrimitiveTopology(VkCommandBuffer commandBuffer,
+                            VkPrimitiveTopology primitiveTopology)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.dyn.topology = primitiveTopology;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetViewportWithCount(VkCommandBuffer commandBuffer,
+                            uint32_t viewportCount,
+                            const VkViewport *pViewports)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.dyn.viewport_count = viewportCount;
+   dzn_CmdSetViewport(commandBuffer, 0, viewportCount, pViewports);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetScissorWithCount(VkCommandBuffer commandBuffer,
+                           uint32_t scissorCount,
+                           const VkRect2D *pScissors)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.dyn.scissor_count = scissorCount;
+   dzn_CmdSetScissor(commandBuffer, 0, scissorCount, pScissors);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetDepthTestEnable(VkCommandBuffer commandBuffer,
+                          VkBool32 depthTestEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.zs.depth_test_enable = depthTestEnable;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetDepthWriteEnable(VkCommandBuffer commandBuffer,
+                           VkBool32 depthWriteEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.zs.depth_write_enable = depthWriteEnable;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetDepthCompareOp(VkCommandBuffer commandBuffer,
+                         VkCompareOp depthCompareOp)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.zs.depth_compare_op = depthCompareOp;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer,
+                                VkBool32 depthBoundsTestEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.zs.depth_bounds_test_enable = depthBoundsTestEnable;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetStencilTestEnable(VkCommandBuffer commandBuffer,
+                            VkBool32 stencilTestEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.zs.stencil_test_enable = stencilTestEnable;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetStencilOp(VkCommandBuffer commandBuffer,
+                    VkStencilFaceFlags faceMask,
+                    VkStencilOp failOp,
+                    VkStencilOp passOp,
+                    VkStencilOp depthFailOp,
+                    VkCompareOp compareOp)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+   const struct dzn_stencil_op_state op = { failOp, passOp, depthFailOp, compareOp };
+
+   if (faceMask & VK_STENCIL_FACE_FRONT_BIT)
+      cmdbuf->state.pipeline_variant.zs.front = op;
+
+   if (faceMask & VK_STENCIL_FACE_BACK_BIT)
+      cmdbuf->state.pipeline_variant.zs.back = op;
+
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetRasterizerDiscardEnable(VkCommandBuffer commandBuffer,
+                                  VkBool32 rasterizerDiscardEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.dyn.rasterizer_discard = rasterizerDiscardEnable;
+   cmdbuf->state.dirty |= DZN_CMD_DIRTY_SCISSORS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetDepthBiasEnable(VkCommandBuffer commandBuffer,
+                          VkBool32 depthBiasEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+   struct dzn_physical_device *pdev =
+      container_of(cmdbuf->vk.base.device->physical, struct dzn_physical_device, vk);
+
+   cmdbuf->state.pipeline_variant.depth_bias_enable = depthBiasEnable;
+   if (pdev->options16.DynamicDepthBiasSupported)
+      cmdbuf->state.dirty |= DZN_CMD_DIRTY_DEPTH_BIAS;
+   else
+      dzn_cmd_buffer_dirty_pipeline(cmdbuf);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_CmdSetPrimitiveRestartEnable(VkCommandBuffer commandBuffer,
+                                 VkBool32 primitiveRestartEnable)
+{
+   VK_FROM_HANDLE(dzn_cmd_buffer, cmdbuf, commandBuffer);
+
+   cmdbuf->state.pipeline_variant.primitive_restart_enable = primitiveRestartEnable;
+   dzn_cmd_buffer_dirty_pipeline(cmdbuf);
 }
 
 VKAPI_ATTR void VKAPI_CALL
