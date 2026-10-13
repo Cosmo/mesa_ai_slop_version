@@ -492,6 +492,34 @@ emit_srv_metadata(struct dxil_module *m, const struct dxil_type *elem_type,
    return dxil_get_metadata_node(m, fields, ARRAY_SIZE(fields));
 }
 
+static bool
+shader_has_coherent_ssbo_access(nir_shader *s)
+{
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            switch (intr->intrinsic) {
+            case nir_intrinsic_load_ssbo:
+            case nir_intrinsic_store_ssbo:
+            case nir_intrinsic_ssbo_atomic:
+            case nir_intrinsic_ssbo_atomic_swap:
+               if (nir_intrinsic_access(intr) & ACCESS_COHERENT)
+                  return true;
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
+
+   return false;
+}
+
 static const struct dxil_mdnode *
 emit_uav_metadata(struct dxil_module *m, const struct dxil_type *struct_type,
                   const char *name, const resource_array_layout *layout,
@@ -573,6 +601,7 @@ struct ntd_context {
 
    struct util_dynarray uav_metadata_nodes;
    const struct dxil_value *ssbo_handles[MAX_UAVS];
+   bool coherent_ssbos;
    const struct dxil_value *image_handles[MAX_UAVS];
    uint32_t num_uavs;
 
@@ -4510,7 +4539,9 @@ emit_load_vulkan_descriptor(struct ntd_context *ctx, nir_intrinsic_instr *intr)
       if (!heap_index_value)
          return false;
       const struct dxil_value *unannotated_handle = emit_createhandle_heap(ctx, heap_index_value, false, true);
-      const struct dxil_value *res_props = dxil_module_get_buffer_res_props_const(&ctx->mod, resource_class, resource_kind);
+      const struct dxil_value *res_props =
+         dxil_module_get_buffer_res_props_const(&ctx->mod, resource_class, resource_kind,
+                                                ctx->coherent_ssbos);
       if (!unannotated_handle || !res_props)
          return false;
       handle = emit_annotate_handle(ctx, unannotated_handle, res_props);
@@ -6071,6 +6102,8 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
          return false;
 
    } else if (ctx->opts->environment == DXIL_ENVIRONMENT_VULKAN) {
+      ctx->coherent_ssbos = shader_has_coherent_ssbo_access(ctx->shader);
+
       /* Handle read/write SSBOs as UAVs */
       nir_foreach_variable_with_modes(var, ctx->shader, nir_var_mem_ssbo) {
          if ((var->data.access & ACCESS_NON_WRITEABLE) == 0) {
@@ -6079,7 +6112,9 @@ emit_module(struct ntd_context *ctx, const struct nir_to_dxil_options *opts)
                count = glsl_get_length(var->type);
             if (!emit_uav(ctx, var->data.binding, var->data.descriptor_set,
                         count, DXIL_COMP_TYPE_INVALID, 1,
-                        DXIL_RESOURCE_KIND_RAW_BUFFER, var->data.access, var->name))
+                        DXIL_RESOURCE_KIND_RAW_BUFFER,
+                        var->data.access | (ctx->coherent_ssbos ? ACCESS_COHERENT : 0),
+                        var->name))
                return false;
             
          }
