@@ -244,14 +244,12 @@ dxil_spirv_nir_lower_bindless(nir_shader *nir, struct dxil_spirv_nir_lower_bindl
    };
    ret |= nir_remove_dead_variables(nir, modes, &dead_var_options);
 
-   if (!descriptor_sets)
-      return ret;
-
    while (descriptor_sets) {
       int index = u_bit_scan(&descriptor_sets);
       add_bindless_data_var(nir, index);
+      ret = true;
    }
-   return true;
+   return ret;
 }
 
 /* Given a global deref chain that starts as a pointer value and ends with a load/store/atomic,
