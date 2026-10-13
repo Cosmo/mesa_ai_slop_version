@@ -3283,9 +3283,11 @@ dzn_cmd_buffer_update_pipeline(struct dzn_cmd_buffer *cmdbuf, uint32_t bindpoint
          }
          ID3D12GraphicsCommandList1_IASetPrimitiveTopology(cmdbuf->cmdlist, topology);
          dzn_graphics_pipeline_get_state(gfx, &cmdbuf->state.pipeline_variant);
+         struct dzn_physical_device *pdev =
+            container_of(device->vk.physical, struct dzn_physical_device, vk);
          if (gfx->multiview.native_view_instancing)
             view_instance_mask = gfx->multiview.view_mask;
-         else
+         else if (pdev->options3.ViewInstancingTier > D3D12_VIEW_INSTANCING_TIER_NOT_SUPPORTED)
             view_instance_mask = 1;
 
          if (gfx->zsa.dynamic_depth_bias && gfx->use_gs_for_polygon_mode_point)
