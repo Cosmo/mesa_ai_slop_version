@@ -917,6 +917,7 @@ struct dzn_pipeline {
    uint32_t desc_count[NUM_POOL_TYPES];
    uint32_t dynamic_buffer_count;
    ID3D12PipelineState *state;
+   bool cache_hit;
 };
 
 extern const struct vk_pipeline_cache_object_ops dzn_cached_blob_ops;

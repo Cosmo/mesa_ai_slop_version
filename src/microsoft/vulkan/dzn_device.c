@@ -163,6 +163,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .EXT_vertex_attribute_divisor          = true,
       .EXT_memory_budget                     = true,
       .EXT_pipeline_creation_cache_control   = true,
+      .EXT_pipeline_creation_feedback        = true,
       .EXT_private_data                      = true,
       .EXT_tooling_info                      = true,
       .MSFT_layered_driver                   = true,

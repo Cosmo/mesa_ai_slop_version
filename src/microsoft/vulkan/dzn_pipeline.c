@@ -38,6 +38,7 @@
 #include "vk_pipeline.h"
 #include "vk_pipeline_cache.h"
 
+#include "util/os_time.h"
 #include "util/u_debug.h"
 
 #define d3d12_pipeline_state_stream_new_desc(__stream, __maxstreamsz, __id, __type, __desc) \
@@ -876,8 +877,10 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
       if (ret != VK_SUCCESS)
          return ret;
 
-      if (cache_hit)
+      if (cache_hit) {
+         pipeline->base.cache_hit = true;
          return VK_SUCCESS;
+      }
    }
 
    if (pipeline->base.flags & VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT_KHR)
@@ -1837,6 +1840,29 @@ dzn_graphics_pipeline_cleanup_dxil_shaders(struct dzn_graphics_pipeline *pipelin
 }
 
 static void
+dzn_pipeline_set_creation_feedback(const void *create_info_next,
+                                   const struct dzn_pipeline *pipeline,
+                                   int64_t start_ns)
+{
+   const VkPipelineCreationFeedbackCreateInfo *info =
+      vk_find_struct_const(create_info_next, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
+   if (!info)
+      return;
+
+   VkPipelineCreationFeedbackFlags flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+   if (pipeline->cache_hit)
+      flags |= VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+
+   info->pPipelineCreationFeedback->flags = flags;
+   info->pPipelineCreationFeedback->duration = os_time_get_nano() - start_ns;
+
+   for (uint32_t i = 0; i < info->pipelineStageCreationFeedbackCount; i++) {
+      info->pPipelineStageCreationFeedbacks[i].flags = flags;
+      info->pPipelineStageCreationFeedbacks[i].duration = 0;
+   }
+}
+
+static void
 dzn_graphics_pipeline_destroy(struct dzn_graphics_pipeline *pipeline,
                               const VkAllocationCallbacks *alloc)
 {
@@ -1880,6 +1906,7 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
    VkResult ret;
    HRESULT hres = 0;
    D3D12_VIEW_INSTANCE_LOCATION vi_locs[D3D12_MAX_VIEW_INSTANCE_COUNT];
+   int64_t start_ns = os_time_get_nano();
 
    struct dzn_graphics_pipeline *pipeline =
       vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*pipeline), 8,
@@ -2075,10 +2102,12 @@ dzn_graphics_pipeline_create(struct dzn_device *device,
    ret = VK_SUCCESS;
 
 out:
-   if (ret != VK_SUCCESS)
+   if (ret != VK_SUCCESS) {
       dzn_graphics_pipeline_destroy(pipeline, pAllocator);
-   else
+   } else {
+      dzn_pipeline_set_creation_feedback(pCreateInfo->pNext, &pipeline->base, start_ns);
       *out = dzn_graphics_pipeline_to_handle(pipeline);
+   }
 
    return ret;
 }
@@ -2514,6 +2543,7 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
       ret = dzn_pipeline_cache_lookup_compute_pipeline(cache, pipeline_hash,
                                                        stream_desc, shader,
                                                        &cache_hit);
+      pipeline->base.cache_hit = cache_hit;
       if (ret != VK_SUCCESS || cache_hit)
          goto out;
    }
@@ -2598,6 +2628,7 @@ dzn_compute_pipeline_create(struct dzn_device *device,
 {
    VK_FROM_HANDLE(dzn_pipeline_layout, layout, pCreateInfo->layout);
    VK_FROM_HANDLE(vk_pipeline_cache, pcache, cache);
+   int64_t start_ns = os_time_get_nano();
 
    struct dzn_compute_pipeline *pipeline =
       vk_zalloc2(&device->vk.alloc, pAllocator, sizeof(*pipeline), 8,
@@ -2629,10 +2660,12 @@ dzn_compute_pipeline_create(struct dzn_device *device,
 
 out:
    free((void *)shader.pShaderBytecode);
-   if (ret != VK_SUCCESS)
+   if (ret != VK_SUCCESS) {
       dzn_compute_pipeline_destroy(pipeline, pAllocator);
-   else
+   } else {
+      dzn_pipeline_set_creation_feedback(pCreateInfo->pNext, &pipeline->base, start_ns);
       *out = dzn_compute_pipeline_to_handle(pipeline);
+   }
 
    return ret;
 }
