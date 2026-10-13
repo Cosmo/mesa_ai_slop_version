@@ -1023,11 +1023,16 @@ dxil_spirv_nir_passes(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
               nir_address_format_32bit_index_offset_pack64);
 
-   if (nir->info.shared_memory_explicit_layout) {
+   if (nir->info.shared_memory_explicit_layout ||
+       nir->info.zero_initialize_shared_memory) {
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types, nir_var_mem_shared,
                  shared_var_info);
       NIR_PASS(_, nir, dxil_nir_split_unaligned_loads_stores, nir_var_mem_shared);
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
+      if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
+         nir->info.shared_size = ALIGN_POT(nir->info.shared_size, 4);
+         NIR_PASS(_, nir, nir_zero_initialize_shared_memory, nir->info.shared_size, 4);
+      }
       NIR_PASS(_, nir, dxil_nir_scratch_and_shared_to_dxil);
    } else {
       NIR_PASS(_, nir, nir_split_struct_vars, nir_var_mem_shared);
