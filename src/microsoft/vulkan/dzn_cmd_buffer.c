@@ -130,10 +130,11 @@ dzn_cmd_buffer_queue_transition_barriers(struct dzn_cmd_buffer *cmdbuf,
             },
          };
       } else {
-	 if (flags & DZN_QUEUE_TRANSITION_BEFORE_IS_UNDEFINED)
-            before = barriers[subres].Transition.StateAfter;
+         ASSERTED D3D12_RESOURCE_STATES subres_before =
+            (flags & DZN_QUEUE_TRANSITION_BEFORE_IS_UNDEFINED) ?
+            barriers[subres].Transition.StateAfter : before;
 
-         assert(barriers[subres].Transition.StateAfter == before ||
+         assert(barriers[subres].Transition.StateAfter == subres_before ||
                 barriers[subres].Transition.StateAfter == after);
          barriers[subres].Transition.StateAfter = after;
       }
@@ -162,22 +163,21 @@ dzn_cmd_buffer_queue_image_range_state_transition(struct dzn_cmd_buffer *cmdbuf,
       uint32_t level_count = dzn_get_level_count(image, range);
       for (uint32_t layer = 0; layer < layer_count; layer++) {
          uint32_t subres = dzn_image_range_get_subresource_index(image, range, aspect, 0, layer);
-         if (!barrier_count) {
-            first_barrier = subres;
-            barrier_count = level_count;
-            continue;
-         } else if (first_barrier + barrier_count == subres) {
+         if (barrier_count && first_barrier + barrier_count == subres) {
             barrier_count += level_count;
             continue;
          }
 
-         ret = dzn_cmd_buffer_queue_transition_barriers(cmdbuf, image->res,
-                                                        first_barrier, barrier_count,
-                                                        before, after, flags);
-         if (ret != VK_SUCCESS)
-            return ret;
+         if (barrier_count) {
+            ret = dzn_cmd_buffer_queue_transition_barriers(cmdbuf, image->res,
+                                                           first_barrier, barrier_count,
+                                                           before, after, flags);
+            if (ret != VK_SUCCESS)
+               return ret;
+         }
 
-         barrier_count = 0;
+         first_barrier = subres;
+         barrier_count = level_count;
       }
 
       if (barrier_count) {
@@ -186,6 +186,8 @@ dzn_cmd_buffer_queue_image_range_state_transition(struct dzn_cmd_buffer *cmdbuf,
                                                         before, after, flags);
          if (ret != VK_SUCCESS)
             return ret;
+
+         barrier_count = 0;
       }
    }
 
@@ -220,22 +222,21 @@ dzn_cmd_buffer_queue_image_range_layout_transition(struct dzn_cmd_buffer *cmdbuf
       uint32_t level_count = dzn_get_level_count(image, range);
       for (uint32_t layer = 0; layer < layer_count; layer++) {
          uint32_t subres = dzn_image_range_get_subresource_index(image, range, aspect, 0, layer);
-         if (!barrier_count) {
-            first_barrier = subres;
-            barrier_count = level_count;
-            continue;
-         } else if (first_barrier + barrier_count == subres) {
+         if (barrier_count && first_barrier + barrier_count == subres) {
             barrier_count += level_count;
             continue;
          }
 
-         ret = dzn_cmd_buffer_queue_transition_barriers(cmdbuf, image->res,
-                                                        first_barrier, barrier_count,
-                                                        before, after, flags);
-         if (ret != VK_SUCCESS)
-            return ret;
+         if (barrier_count) {
+            ret = dzn_cmd_buffer_queue_transition_barriers(cmdbuf, image->res,
+                                                           first_barrier, barrier_count,
+                                                           before, after, flags);
+            if (ret != VK_SUCCESS)
+               return ret;
+         }
 
-         barrier_count = 0;
+         first_barrier = subres;
+         barrier_count = level_count;
       }
 
       if (barrier_count) {
@@ -244,6 +245,8 @@ dzn_cmd_buffer_queue_image_range_layout_transition(struct dzn_cmd_buffer *cmdbuf
                                                         before, after, flags);
          if (ret != VK_SUCCESS)
             return ret;
+
+         barrier_count = 0;
       }
    }
 
