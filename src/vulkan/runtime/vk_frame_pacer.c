@@ -129,7 +129,7 @@ evaluate_frame(struct vk_frame_pacer *frame_pacer, struct vk_frame_time_info *fr
 
       while (num_timestamps > 0) {
          /* Retrieve timestamp results from this queue. */
-         VkResult res = device->dispatch_table.GetQueryPoolResults(
+         ASSERTED VkResult res = device->dispatch_table.GetQueryPoolResults(
             _device, queue_ctx->queryPool, query_idx, num_timestamps,
             sizeof(struct query) * num_timestamps, &query_begin->gpu_ts, sizeof(struct query),
             VK_QUERY_RESULT_64_BIT);
