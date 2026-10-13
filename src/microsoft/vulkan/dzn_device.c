@@ -127,6 +127,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_maintenance1                      = true,
       .KHR_maintenance2                      = true,
       .KHR_maintenance3                      = true,
+      .KHR_maintenance4                      = true,
       .KHR_multiview                         = true,
       .KHR_relaxed_block_layout              = true,
       .KHR_sampler_mirror_clamp_to_edge      = true,
@@ -813,7 +814,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .shaderZeroInitializeWorkgroupMemory = true,
       .dynamicRendering                   = true,
       .shaderIntegerDotProduct            = true,
-      .maintenance4                       = false,
+      .maintenance4                       = true,
       .shaderExpectAssume                 = true,
 
       .vertexAttributeInstanceRateDivisor = true,
@@ -1089,6 +1090,8 @@ dzn_physical_device_get_properties(const struct dzn_physical_device *pdev,
       /* VkPhysicalDeviceLayeredDriverPropertiesMSFT */
       .underlyingAPI = VK_LAYERED_DRIVER_UNDERLYING_API_D3D12_MSFT,
    };
+
+   properties->maxBufferSize = MAX2(properties->maxMemoryAllocationSize, 1ull << 30);
 
    if (strlen(instance->drirc.debug.force_vk_devicename) > 0) {
       snprintf(properties->deviceName,
@@ -3361,6 +3364,25 @@ dzn_GetBufferMemoryRequirements2(VkDevice dev,
    }
 }
 
+VKAPI_ATTR void VKAPI_CALL
+dzn_GetDeviceBufferMemoryRequirements(VkDevice device,
+                                      const VkDeviceBufferMemoryRequirements *pInfo,
+                                      VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VkBuffer buffer;
+   if (dzn_CreateBuffer(device, pInfo->pCreateInfo, NULL, &buffer) != VK_SUCCESS) {
+      pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) { 0 };
+      return;
+   }
+
+   const VkBufferMemoryRequirementsInfo2 info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+      .buffer = buffer,
+   };
+   dzn_GetBufferMemoryRequirements2(device, &info, pMemoryRequirements);
+   dzn_DestroyBuffer(device, buffer, NULL);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 dzn_BindBufferMemory2(VkDevice _device,
                       uint32_t bindInfoCount,
@@ -3748,6 +3770,15 @@ dzn_GetImageSparseMemoryRequirements2(VkDevice device,
                                       const VkImageSparseMemoryRequirementsInfo2* pInfo,
                                       uint32_t *pSparseMemoryRequirementCount,
                                       VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
+{
+   *pSparseMemoryRequirementCount = 0;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+dzn_GetDeviceImageSparseMemoryRequirements(VkDevice device,
+                                           const VkDeviceImageMemoryRequirements *pInfo,
+                                           uint32_t *pSparseMemoryRequirementCount,
+                                           VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
    *pSparseMemoryRequirementCount = 0;
 }

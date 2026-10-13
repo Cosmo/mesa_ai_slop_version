@@ -926,6 +926,25 @@ dzn_GetImageMemoryRequirements2(VkDevice _device,
 }
 
 VKAPI_ATTR void VKAPI_CALL
+dzn_GetDeviceImageMemoryRequirements(VkDevice device,
+                                     const VkDeviceImageMemoryRequirements *pInfo,
+                                     VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VkImage image;
+   if (dzn_CreateImage(device, pInfo->pCreateInfo, NULL, &image) != VK_SUCCESS) {
+      pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) { 0 };
+      return;
+   }
+
+   const VkImageMemoryRequirementsInfo2 info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+      .image = image,
+   };
+   dzn_GetImageMemoryRequirements2(device, &info, pMemoryRequirements);
+   dzn_DestroyImage(device, image, NULL);
+}
+
+VKAPI_ATTR void VKAPI_CALL
 dzn_GetImageSubresourceLayout(VkDevice _device,
                               VkImage _image,
                               const VkImageSubresource *subresource,
