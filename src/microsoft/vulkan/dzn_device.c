@@ -102,6 +102,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_16bit_storage                     = pdev->options4.Native16BitShaderOpsSupported,
       .KHR_bind_memory2                      = true,
       .KHR_buffer_device_address             = pdev->shader_model >= D3D_SHADER_MODEL_6_6,
+      .KHR_copy_commands2                    = true,
       .KHR_create_renderpass2                = true,
       .KHR_dedicated_allocation              = true,
       .KHR_depth_stencil_resolve             = true,
@@ -134,6 +135,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_shader_float16_int8               = pdev->options4.Native16BitShaderOpsSupported,
       .KHR_shader_float_controls             = true,
       .KHR_shader_integer_dot_product        = true,
+      .KHR_shader_non_semantic_info          = true,
       .KHR_shader_terminate_invocation       = true,
       .KHR_spirv_1_4                         = true,
       .KHR_storage_buffer_storage_class      = true,
@@ -159,6 +161,8 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .EXT_subgroup_size_control             = true,
       .EXT_vertex_attribute_divisor          = true,
       .EXT_memory_budget                     = true,
+      .EXT_private_data                      = true,
+      .EXT_tooling_info                      = true,
       .MSFT_layered_driver                   = true,
    };
 }
