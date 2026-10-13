@@ -2370,6 +2370,17 @@ dzn_device_check_status(struct vk_device *dev)
    return VK_SUCCESS;
 }
 
+static void __stdcall
+dzn_d3d12_message(D3D12_MESSAGE_CATEGORY category,
+                  D3D12_MESSAGE_SEVERITY severity,
+                  D3D12_MESSAGE_ID id,
+                  LPCSTR description,
+                  void *context)
+{
+   if (severity <= D3D12_MESSAGE_SEVERITY_ERROR)
+      mesa_loge("D3D12: %s\n", description);
+}
+
 static VkResult
 dzn_device_create(struct dzn_physical_device *pdev,
                   const VkDeviceCreateInfo *pCreateInfo,
@@ -2481,6 +2492,16 @@ dzn_device_create(struct dzn_physical_device *pdev,
 
       ID3D12InfoQueue_PushStorageFilter(info_queue, &NewFilter);
       ID3D12InfoQueue_Release(info_queue);
+   }
+
+   ID3D12InfoQueue1 *info_queue1;
+   if ((instance->debug_flags & DZN_DEBUG_D3D12) &&
+       SUCCEEDED(ID3D12Device1_QueryInterface(device->dev, &IID_ID3D12InfoQueue1,
+                                              (void **)&info_queue1))) {
+      DWORD cookie;
+      ID3D12InfoQueue1_RegisterMessageCallback(info_queue1, dzn_d3d12_message,
+                                               D3D12_MESSAGE_CALLBACK_FLAG_NONE, NULL, &cookie);
+      ID3D12InfoQueue1_Release(info_queue1);
    }
 
    IUnknown_QueryInterface(device->dev, &IID_ID3D12DeviceConfiguration, (void **)&device->dev_config);
