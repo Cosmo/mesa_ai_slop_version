@@ -198,6 +198,47 @@ temp_var_info(const struct glsl_type* type, unsigned* size, unsigned* align)
    }
 }
 
+static uint64_t
+descriptor_key(uint32_t desc_set, uint32_t binding)
+{
+   return ((uint64_t)desc_set << 32) | binding;
+}
+
+static void
+gather_resource_index_bindings(nir_shader *nir, struct util_dynarray *bindings)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_vulkan_resource_index)
+               continue;
+
+            uint64_t key = descriptor_key(nir_intrinsic_desc_set(intr),
+                                          nir_intrinsic_binding(intr));
+            util_dynarray_append(bindings, key);
+         }
+      }
+   }
+}
+
+static bool
+can_remove_unused_ssbo(nir_variable *var, void *data)
+{
+   const struct util_dynarray *bindings = data;
+   uint64_t key = descriptor_key(var->data.descriptor_set, var->data.binding);
+
+   util_dynarray_foreach(bindings, uint64_t, used) {
+      if (*used == key)
+         return false;
+   }
+
+   return true;
+}
+
 static nir_variable *
 add_runtime_data_var(nir_shader *nir, unsigned desc_set, unsigned binding)
 {
@@ -1007,6 +1048,17 @@ dxil_spirv_nir_passes(nir_shader *nir,
               nir_var_shader_in | nir_var_shader_out |
               nir_var_system_value | nir_var_mem_shared,
               NULL);
+
+   struct util_dynarray used_bindings;
+   util_dynarray_init(&used_bindings, NULL);
+   gather_resource_index_bindings(nir, &used_bindings);
+   const nir_remove_dead_variables_options unused_ssbo_options = {
+      .can_remove_var = can_remove_unused_ssbo,
+      .can_remove_var_data = &used_bindings,
+   };
+   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_mem_ssbo,
+            &unused_ssbo_options);
+   util_dynarray_fini(&used_bindings);
 
    uint32_t push_constant_size = 0;
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
