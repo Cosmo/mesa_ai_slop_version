@@ -3322,9 +3322,11 @@ dzn_buffer_get_copy_loc(const struct dzn_buffer *buf,
      },
    };
 
+   uint32_t buffer_image_height =
+      region->bufferImageHeight ? region->bufferImageHeight : region->imageExtent.height;
    uint32_t buffer_layer_stride =
       loc.PlacedFootprint.Footprint.RowPitch *
-      DIV_ROUND_UP(loc.PlacedFootprint.Footprint.Height, blkh);
+      DIV_ROUND_UP(buffer_image_height, blkh);
 
    loc.PlacedFootprint.Offset =
       region->bufferOffset + (layer * buffer_layer_stride);
