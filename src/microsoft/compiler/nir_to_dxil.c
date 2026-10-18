@@ -6240,6 +6240,35 @@ get_dxil_shader_kind(struct nir_shader *s)
 static unsigned
 lower_bit_size_callback(const nir_instr* instr, void *data)
 {
+   const struct nir_to_dxil_options *opts = (const struct nir_to_dxil_options*)data;
+   unsigned min_bit_size = opts->lower_int16 ? 32 : 16;
+
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      switch (intr->intrinsic) {
+      case nir_intrinsic_read_invocation:
+      case nir_intrinsic_read_first_invocation:
+      case nir_intrinsic_shuffle:
+      case nir_intrinsic_shuffle_xor:
+      case nir_intrinsic_shuffle_up:
+      case nir_intrinsic_shuffle_down:
+      case nir_intrinsic_quad_broadcast:
+      case nir_intrinsic_quad_swap_horizontal:
+      case nir_intrinsic_quad_swap_vertical:
+      case nir_intrinsic_quad_swap_diagonal:
+      case nir_intrinsic_reduce:
+      case nir_intrinsic_inclusive_scan:
+      case nir_intrinsic_exclusive_scan:
+      case nir_intrinsic_vote_ieq:
+      case nir_intrinsic_vote_feq: {
+         unsigned bit_size = nir_src_bit_size(intr->src[0]);
+         return bit_size != 1 && bit_size < min_bit_size ? min_bit_size : 0;
+      }
+      default:
+         return 0;
+      }
+   }
+
    if (instr->type != nir_instr_type_alu)
       return 0;
    nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -6251,8 +6280,6 @@ lower_bit_size_callback(const nir_instr* instr, void *data)
       return 0;
 
    unsigned num_inputs = nir_op_infos[alu->op].num_inputs;
-   const struct nir_to_dxil_options *opts = (const struct nir_to_dxil_options*)data;
-   unsigned min_bit_size = opts->lower_int16 ? 32 : 16;
 
    unsigned ret = 0;
    for (unsigned i = 0; i < num_inputs; i++) {
