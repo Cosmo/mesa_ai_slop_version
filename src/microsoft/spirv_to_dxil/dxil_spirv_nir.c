@@ -56,6 +56,7 @@ spirv_caps = {
    .RoundingModeRTE = true,
    .RoundingModeRTZ = true,
    .Float16 = true,
+   .Int8 = true,
    .Int16 = true,
    .StorageBuffer8BitAccess = true,
    .UniformAndStorageBuffer8BitAccess = true,

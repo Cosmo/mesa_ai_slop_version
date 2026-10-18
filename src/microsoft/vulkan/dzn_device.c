@@ -99,7 +99,7 @@ static void
 dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
 {
    pdev->vk.supported_extensions = (struct vk_device_extension_table) {
-      .KHR_16bit_storage                     = pdev->options4.Native16BitShaderOpsSupported,
+      .KHR_16bit_storage                     = true,
       .KHR_bind_memory2                      = true,
       .KHR_buffer_device_address             = pdev->shader_model >= D3D_SHADER_MODEL_6_6,
       .KHR_copy_commands2                    = true,
@@ -134,7 +134,7 @@ dzn_physical_device_get_extensions(struct dzn_physical_device *pdev)
       .KHR_separate_depth_stencil_layouts    = true,
       .KHR_shader_draw_parameters            = true,
       .KHR_shader_expect_assume              = true,
-      .KHR_shader_float16_int8               = pdev->options4.Native16BitShaderOpsSupported,
+      .KHR_shader_float16_int8               = true,
       .KHR_shader_float_controls             = true,
       .KHR_shader_integer_dot_product        = true,
       .KHR_shader_non_semantic_info          = true,
@@ -693,6 +693,15 @@ dzn_physical_device_get_max_array_layers()
    return dzn_physical_device_get_max_extent(false);
 }
 
+static bool
+dzn_physical_device_supports_8bit(const struct dzn_physical_device *pdev)
+{
+   struct dzn_instance *instance = container_of(pdev->vk.instance, struct dzn_instance, vk);
+
+   return !pdev->options4.Native16BitShaderOpsSupported ||
+          instance->drirc.debug.enable_8bit_loads_stores;
+}
+
 static void
 dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
                                  struct vk_features *features)
@@ -701,8 +710,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
 
    bool support_descriptor_indexing = pdev->shader_model >= D3D_SHADER_MODEL_6_6 &&
       !(instance->debug_flags & DZN_DEBUG_NO_BINDLESS);
-   bool support_8bit = instance->drirc.debug.enable_8bit_loads_stores &&
-      pdev->options4.Native16BitShaderOpsSupported;
+   bool support_8bit = dzn_physical_device_supports_8bit(pdev);
 
    *features = (struct vk_features) {
       .robustBufferAccess = true, /* This feature is mandatory */
@@ -746,7 +754,7 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .shaderCullDistance = true,
       .shaderFloat64 = pdev->options.DoublePrecisionFloatShaderOps,
       .shaderInt64 = pdev->options1.Int64ShaderOps,
-      .shaderInt16 = pdev->options4.Native16BitShaderOpsSupported,
+      .shaderInt16 = true,
       .shaderResourceResidency = false,
       .shaderResourceMinLod = false,
       .sparseBinding = false,
@@ -761,8 +769,8 @@ dzn_physical_device_get_features(const struct dzn_physical_device *pdev,
       .variableMultisampleRate = false,
       .inheritedQueries = false,
 
-      .storageBuffer16BitAccess           = pdev->options4.Native16BitShaderOpsSupported,
-      .uniformAndStorageBuffer16BitAccess = pdev->options4.Native16BitShaderOpsSupported,
+      .storageBuffer16BitAccess           = true,
+      .uniformAndStorageBuffer16BitAccess = true,
       .storagePushConstant16              = false,
       .storageInputOutput16               = false,
       .multiview                          = true,
@@ -1241,8 +1249,7 @@ dzn_physical_device_create(struct vk_instance *instance,
    dzn_physical_device_init_uuids(pdev);
 
    dzn_physical_device_get_extensions(pdev);
-   if (dzn_instance->drirc.debug.enable_8bit_loads_stores &&
-       pdev->options4.Native16BitShaderOpsSupported)
+   if (dzn_physical_device_supports_8bit(pdev))
       pdev->vk.supported_extensions.KHR_8bit_storage = true;
    if (dzn_instance->debug_flags & DZN_DEBUG_NO_BINDLESS)
       pdev->vk.supported_extensions.EXT_descriptor_indexing = false;

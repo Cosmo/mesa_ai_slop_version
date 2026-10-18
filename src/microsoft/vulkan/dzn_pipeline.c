@@ -228,6 +228,26 @@ struct dzn_nir_options {
    const nir_shader_compiler_options *nir_opts;
 };
 
+static bool
+dzn_device_lowers_16bit(const struct dzn_device *device)
+{
+   const struct dzn_physical_device *pdev =
+      container_of(device->vk.physical, struct dzn_physical_device, vk);
+
+   return !pdev->options4.Native16BitShaderOpsSupported &&
+          (device->vk.enabled_extensions.KHR_shader_float16_int8 ||
+           device->vk.enabled_extensions.KHR_8bit_storage ||
+           device->vk.enabled_extensions.KHR_16bit_storage ||
+           device->vk.enabled_features.shaderFloat16 ||
+           device->vk.enabled_features.shaderInt16 ||
+           device->vk.enabled_features.shaderInt8 ||
+           device->vk.enabled_features.storageBuffer8BitAccess ||
+           device->vk.enabled_features.uniformAndStorageBuffer8BitAccess ||
+           device->vk.enabled_features.storagePushConstant8 ||
+           device->vk.enabled_features.storageBuffer16BitAccess ||
+           device->vk.enabled_features.uniformAndStorageBuffer16BitAccess);
+}
+
 static VkResult
 dzn_pipeline_get_nir_shader(struct dzn_device *device,
                             const struct dzn_pipeline_layout *layout,
@@ -255,11 +275,15 @@ dzn_pipeline_get_nir_shader(struct dzn_device *device,
 
    struct dzn_physical_device *pdev =
       container_of(device->vk.physical, struct dzn_physical_device, vk);
-   const struct spirv_to_nir_options *spirv_opts = dxil_spirv_nir_get_spirv_options();
+   struct spirv_to_nir_options spirv_opts = *dxil_spirv_nir_get_spirv_options();
+   if (dzn_device_lowers_16bit(device)) {
+      spirv_opts.mediump_16bit_alu = false;
+      spirv_opts.mediump_16bit_derivatives = false;
+   }
 
    VkResult result =
       vk_pipeline_shader_stage_to_nir(&device->vk, pipeline_flags, stage_info,
-                                      spirv_opts, options->nir_opts, NULL, nir);
+                                      &spirv_opts, options->nir_opts, NULL, nir);
    if (result != VK_SUCCESS)
       return result;
 
@@ -437,11 +461,8 @@ dzn_pipeline_compile_shader(struct dzn_device *device,
       container_of(device->vk.physical, struct dzn_physical_device, vk);
    struct nir_to_dxil_options opts = {
       .environment = DXIL_ENVIRONMENT_VULKAN,
-      .lower_int16 = !pdev->options4.Native16BitShaderOpsSupported &&
       /* Don't lower 16-bit types if they can only come from min-precision */
-         (device->vk.enabled_extensions.KHR_shader_float16_int8 ||
-          device->vk.enabled_features.shaderFloat16 ||
-          device->vk.enabled_features.shaderInt16),
+      .lower_int16 = dzn_device_lowers_16bit(device),
       .shader_model_max = dzn_get_shader_model(pdev),
       .input_clip_size = input_clip_size,
       .advanced_texture_ops = pdev->options14.AdvancedTextureOpsSupported,
@@ -913,6 +934,8 @@ dzn_graphics_pipeline_compile_shaders(struct dzn_device *device,
       if (cache) {
          _mesa_blake3_init(&nir_hash_ctx);
          _mesa_blake3_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
+         bool lowers_16bit = dzn_device_lowers_16bit(device);
+         _mesa_blake3_update(&nir_hash_ctx, &lowers_16bit, sizeof(lowers_16bit));
          if (stage != MESA_SHADER_FRAGMENT) {
             _mesa_blake3_update(&nir_hash_ctx, &lower_view_index, sizeof(lower_view_index));
             _mesa_blake3_update(&nir_hash_ctx, &force_sample_rate_shading, sizeof(force_sample_rate_shading));
@@ -2820,11 +2843,13 @@ dzn_compute_pipeline_compile_shader(struct dzn_device *device,
       blake3_hasher nir_hash_ctx;
       _mesa_blake3_init(&nir_hash_ctx);
       _mesa_blake3_update(&nir_hash_ctx, &device->bindless, sizeof(device->bindless));
+      bool lowers_16bit = dzn_device_lowers_16bit(device);
+      _mesa_blake3_update(&nir_hash_ctx, &lowers_16bit, sizeof(lowers_16bit));
       _mesa_blake3_update(&nir_hash_ctx, spirv_hash, sizeof(spirv_hash));
       _mesa_blake3_final(&nir_hash_ctx, nir_hash);
    }
    nir_shader_compiler_options nir_opts;
-   const unsigned supported_bit_sizes = 16 | 32 | 64;
+   const unsigned supported_bit_sizes = (pdev->options4.Native16BitShaderOpsSupported ? 16 : 0) | 32 | 64;
    dxil_get_nir_compiler_options(&nir_opts, dzn_get_shader_model(pdev), supported_bit_sizes, supported_bit_sizes);
    struct dzn_nir_options options = {
       .nir_opts = &nir_opts,
