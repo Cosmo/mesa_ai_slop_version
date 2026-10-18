@@ -232,7 +232,27 @@ lower_mem_load(nir_builder *b, nir_intrinsic_instr *intrin,
             nir_intrinsic_set_base(load, base_aligned);
          }
 
-         if (nir_intrinsic_has_range(load)) {
+         if (nir_intrinsic_has_range_base(load)) {
+            const uint64_t orig_range_base = nir_intrinsic_range_base(load);
+            const uint64_t orig_range = nir_intrinsic_range(load);
+            if (orig_range_base != 0 || orig_range != UINT32_MAX) {
+               const uint64_t requested_bytes_read =
+                  requested.num_components * (requested.bit_size / 8);
+               const uint64_t align_mask_u64 = align_mask;
+               const uint64_t max_orig_offset =
+                  orig_range_base + orig_range - bytes_read;
+               const uint64_t max_new_offset =
+                  (max_orig_offset + chunk_start) & ~align_mask_u64;
+               const uint64_t new_range_base = orig_range_base & ~align_mask_u64;
+
+               uint64_t new_range =
+                  max_new_offset + requested_bytes_read - new_range_base;
+               if (orig_range == 0 || new_range > UINT32_MAX)
+                  new_range = 0;
+               nir_intrinsic_set_range_base(load, new_range_base);
+               nir_intrinsic_set_range(load, new_range);
+            }
+         } else if (nir_intrinsic_has_range(load)) {
             assert(nir_intrinsic_has_base(load));
             const uint64_t orig_range = nir_intrinsic_range(load);
             const uint32_t requested_bytes_read =
