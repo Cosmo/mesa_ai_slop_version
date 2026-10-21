@@ -206,6 +206,9 @@ static const struct debug_control dzn_debug_options[] = {
    { "multiview", DZN_DEBUG_MULTIVIEW },
    { "no16bit", DZN_DEBUG_NO_16BIT },
    { "nostencilref", DZN_DEBUG_NO_STENCIL_REF },
+   { "noviewcache", DZN_DEBUG_NO_VIEW_CACHE },
+   { "nobuffercache", DZN_DEBUG_NO_BUFFER_CACHE },
+   { "noviewslots", DZN_DEBUG_NO_VIEW_SLOTS },
    { NULL, 0 }
 };
 
@@ -2344,6 +2347,13 @@ dzn_device_destroy(struct dzn_device *device, const VkAllocationCallbacks *pAllo
       mtx_destroy(&device->device_heaps[type].lock);
    }
 
+   if (device->view_heap_ready) {
+      dzn_descriptor_heap_finish(&device->view_heap.heap);
+      util_dynarray_fini(&device->view_heap.slot_freelist);
+      mtx_destroy(&device->view_heap.lock);
+      mtx_destroy(&device->view_lock);
+   }
+
    if (device->dev_config)
       ID3D12DeviceConfiguration_Release(device->dev_config);
 
@@ -2588,6 +2598,17 @@ dzn_device_create(struct dzn_physical_device *pdev,
          device->device_heaps[type].slot_freelist = UTIL_DYNARRAY_INIT;
          device->device_heaps[type].next_alloc_slot = 0;
       }
+   } else if (!(instance->debug_flags & DZN_DEBUG_NO_VIEW_CACHE)) {
+      if (dzn_descriptor_heap_init(&device->view_heap.heap, device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                   65536, false) != VK_SUCCESS)
+         memset(&device->view_heap.heap, 0, sizeof(device->view_heap.heap));
+      mtx_init(&device->view_heap.lock, mtx_plain);
+      device->view_heap.slot_freelist = UTIL_DYNARRAY_INIT;
+      device->view_heap.next_alloc_slot = 0;
+      mtx_init(&device->view_lock, mtx_plain);
+      device->view_heap_ready = true;
+      device->buffer_view_cache = !(instance->debug_flags & DZN_DEBUG_NO_BUFFER_CACHE);
+      device->lazy_view_slots = !(instance->debug_flags & DZN_DEBUG_NO_VIEW_SLOTS);
    }
 
    assert(queue_count == qindex);
@@ -3198,6 +3219,13 @@ dzn_buffer_destroy(struct dzn_buffer *buf, const VkAllocationCallbacks *pAllocat
       }
       _mesa_hash_table_destroy(buf->custom_views, NULL);
    }
+   if (buf->view_cache) {
+      for (uint32_t i = 0; i < DZN_BUFFER_VIEW_CACHE_SIZE; i++) {
+         for (uint32_t s = 0; s < ARRAY_SIZE(buf->view_cache->entries[i].slots); s++)
+            dzn_device_view_heap_free_slot(device, buf->view_cache->entries[i].slots[s]);
+      }
+      free(buf->view_cache);
+   }
 
    vk_object_base_finish(&buf->base);
    vk_free2(&device->vk.alloc, pAllocator, buf);
@@ -3275,7 +3303,7 @@ dzn_buffer_create(struct dzn_device *device,
       }
    }
 
-   if (device->bindless)
+   if (device->bindless || device->view_heap_ready)
       mtx_init(&buf->bindless_view_lock, mtx_plain);
 
    const VkExternalMemoryBufferCreateInfo *external_info =
@@ -3812,11 +3840,9 @@ dzn_DestroySampler(VkDevice device,
    dzn_sampler_destroy(dzn_sampler_from_handle(sampler), pAllocator);
 }
 
-int
-dzn_device_descriptor_heap_alloc_slot(struct dzn_device *device,
-                                      D3D12_DESCRIPTOR_HEAP_TYPE type)
+static int
+dzn_device_heap_alloc_slot(struct dzn_device_descriptor_heap *heap)
 {
-   struct dzn_device_descriptor_heap *heap = &device->device_heaps[type];
    mtx_lock(&heap->lock);
 
    int ret = -1;
@@ -3829,12 +3855,9 @@ dzn_device_descriptor_heap_alloc_slot(struct dzn_device *device,
    return ret;
 }
 
-void
-dzn_device_descriptor_heap_free_slot(struct dzn_device *device,
-                                     D3D12_DESCRIPTOR_HEAP_TYPE type,
-                                     int slot)
+static void
+dzn_device_heap_free_slot(struct dzn_device_descriptor_heap *heap, int slot)
 {
-   struct dzn_device_descriptor_heap *heap = &device->device_heaps[type];
    assert(slot < 0 || slot < heap->heap.desc_count);
 
    if (slot < 0)
@@ -3843,6 +3866,36 @@ dzn_device_descriptor_heap_free_slot(struct dzn_device *device,
    mtx_lock(&heap->lock);
    util_dynarray_append(&heap->slot_freelist, slot);
    mtx_unlock(&heap->lock);
+}
+
+int
+dzn_device_descriptor_heap_alloc_slot(struct dzn_device *device,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE type)
+{
+   return dzn_device_heap_alloc_slot(&device->device_heaps[type]);
+}
+
+void
+dzn_device_descriptor_heap_free_slot(struct dzn_device *device,
+                                     D3D12_DESCRIPTOR_HEAP_TYPE type,
+                                     int slot)
+{
+   dzn_device_heap_free_slot(&device->device_heaps[type], slot);
+}
+
+int
+dzn_device_view_heap_alloc_slot(struct dzn_device *device)
+{
+   if (!device->view_heap_ready || !device->view_heap.heap.heap)
+      return -1;
+   return dzn_device_heap_alloc_slot(&device->view_heap);
+}
+
+void
+dzn_device_view_heap_free_slot(struct dzn_device *device, int slot)
+{
+   if (device->view_heap_ready)
+      dzn_device_heap_free_slot(&device->view_heap, slot);
 }
 
 VKAPI_ATTR void VKAPI_CALL

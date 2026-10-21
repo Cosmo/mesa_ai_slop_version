@@ -310,6 +310,11 @@ struct dzn_device {
    bool bindless;
    bool support_static_samplers;
    struct dzn_device_descriptor_heap device_heaps[NUM_POOL_TYPES];
+   struct dzn_device_descriptor_heap view_heap;
+   bool view_heap_ready;
+   mtx_t view_lock;
+   bool buffer_view_cache;
+   bool lazy_view_slots;
 };
 
 void dzn_meta_finish(struct dzn_device *device);
@@ -557,6 +562,14 @@ void
 dzn_device_descriptor_heap_free_slot(struct dzn_device *device,
                                      D3D12_DESCRIPTOR_HEAP_TYPE type,
                                      int slot);
+
+#define DZN_VIEW_SLOT_LAZY (-2)
+
+int
+dzn_device_view_heap_alloc_slot(struct dzn_device *device);
+
+void
+dzn_device_view_heap_free_slot(struct dzn_device *device, int slot);
 
 struct dzn_cmd_buffer_query_range {
    struct dzn_query_pool *qpool;
@@ -1230,6 +1243,8 @@ struct dzn_image_view {
    D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc;
    int srv_bindless_slot;
    int uav_bindless_slot;
+   int srv_view_slot;
+   int uav_view_slot;
 };
 
 void
@@ -1239,6 +1254,19 @@ dzn_image_view_init(struct dzn_device *device,
 
 void
 dzn_image_view_finish(struct dzn_image_view *iview);
+
+#define DZN_BUFFER_VIEW_CACHE_SIZE 64
+
+struct dzn_buffer_view_cache_entry {
+   VkDescriptorType type;
+   VkDeviceSize offset;
+   VkDeviceSize range;
+   int slots[2];
+};
+
+struct dzn_buffer_view_cache {
+   struct dzn_buffer_view_cache_entry entries[DZN_BUFFER_VIEW_CACHE_SIZE];
+};
 
 struct dzn_buffer {
    struct vk_object_base base;
@@ -1259,6 +1287,7 @@ struct dzn_buffer {
    int cbv_bindless_slot;
    int uav_bindless_slot;
    struct hash_table *custom_views;
+   struct dzn_buffer_view_cache *view_cache;
 };
 
 void
@@ -1294,6 +1323,8 @@ struct dzn_buffer_view {
    D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc;
    int srv_bindless_slot;
    int uav_bindless_slot;
+   int srv_view_slot;
+   int uav_view_slot;
 };
 
 struct dzn_sampler {
@@ -1356,6 +1387,9 @@ enum dzn_debug_flags {
    DZN_DEBUG_MULTIVIEW = 1 << 13,
    DZN_DEBUG_NO_16BIT = 1 << 14,
    DZN_DEBUG_NO_STENCIL_REF = 1 << 15,
+   DZN_DEBUG_NO_VIEW_CACHE = 1 << 16,
+   DZN_DEBUG_NO_BUFFER_CACHE = 1 << 17,
+   DZN_DEBUG_NO_VIEW_SLOTS = 1 << 18,
 };
 
 struct dzn_instance {

@@ -1358,6 +1358,7 @@ dzn_image_view_init(struct dzn_device *device,
    ASSERTED uint32_t layer_count = dzn_get_layer_count(image, range);
 
    vk_image_view_init(&device->vk, &iview->vk, pCreateInfo);
+   iview->srv_view_slot = iview->uav_view_slot = -1;
 
    assert(layer_count > 0);
    assert(range->baseMipLevel < image->vk.mip_levels);
@@ -1411,6 +1412,8 @@ dzn_image_view_destroy(struct dzn_image_view *iview,
 
    dzn_device_descriptor_heap_free_slot(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, iview->srv_bindless_slot);
    dzn_device_descriptor_heap_free_slot(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, iview->uav_bindless_slot);
+   dzn_device_view_heap_free_slot(device, iview->srv_view_slot);
+   dzn_device_view_heap_free_slot(device, iview->uav_view_slot);
 
    vk_image_view_finish(&iview->vk);
    vk_free2(&device->vk.alloc, pAllocator, iview);
@@ -1432,6 +1435,7 @@ dzn_image_view_create(struct dzn_device *device,
    dzn_image_view_init(device, iview, pCreateInfo);
 
    iview->srv_bindless_slot = iview->uav_bindless_slot = -1;
+   iview->srv_view_slot = iview->uav_view_slot = device->lazy_view_slots ? DZN_VIEW_SLOT_LAZY : -1;
    if (device->bindless) {
       if (!(image->desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
          iview->srv_bindless_slot = dzn_device_descriptor_heap_alloc_slot(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1494,6 +1498,8 @@ dzn_buffer_view_destroy(struct dzn_buffer_view *bview,
 
    dzn_device_descriptor_heap_free_slot(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, bview->srv_bindless_slot);
    dzn_device_descriptor_heap_free_slot(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, bview->uav_bindless_slot);
+   dzn_device_view_heap_free_slot(device, bview->srv_view_slot);
+   dzn_device_view_heap_free_slot(device, bview->uav_view_slot);
 
    vk_object_base_finish(&bview->base);
    vk_free2(&device->vk.alloc, pAllocator, bview);
@@ -1523,6 +1529,7 @@ dzn_buffer_view_create(struct dzn_device *device,
 
    bview->buffer = buf;
    bview->srv_bindless_slot = bview->uav_bindless_slot = -1;
+   bview->srv_view_slot = bview->uav_view_slot = device->lazy_view_slots ? DZN_VIEW_SLOT_LAZY : -1;
    if (buf->usage &
        (VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
         VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)) {
