@@ -1266,6 +1266,9 @@ struct dzn_buffer_view_cache_entry {
 
 struct dzn_buffer_view_cache {
    struct dzn_buffer_view_cache_entry entries[DZN_BUFFER_VIEW_CACHE_SIZE];
+   uint32_t lookups;
+   uint32_t hits;
+   bool bypass;
 };
 
 struct dzn_buffer {

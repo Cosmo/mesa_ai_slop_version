@@ -1768,6 +1768,18 @@ dzn_descriptor_set_put_cached_buffer_desc(struct dzn_device *device,
    }
 
    if (entry) {
+      bool hit = entry->type == bdesc->type && entry->offset == bdesc->offset && entry->range == range;
+      struct dzn_buffer_view_cache *cache = buf->view_cache;
+      cache->hits += hit;
+      if (++cache->lookups == 1024) {
+         cache->bypass = cache->hits < 64;
+         cache->lookups = cache->hits = 0;
+      }
+      if (!hit && cache->bypass && (cache->lookups & 15))
+         entry = NULL;
+   }
+
+   if (entry) {
       if (entry->type != bdesc->type || entry->offset != bdesc->offset || entry->range != range) {
          dzn_descriptor_heap_write_buffer_desc(device, view_heap, entry->slots[0], primary_writable, bdesc);
          if (primary_writable)
